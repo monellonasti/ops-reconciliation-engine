@@ -32,7 +32,7 @@ EMP-00030,Jonas,Haddad,jonas.haddad30@example.com,IT75H5534376638509432800030,fi
 EMP-00031,Franco,Galli,franco.galli31@example.com,IT38F5038488241142112600031,full_time,HR,40,2250,0,0,2018-11-17,
 EMP-00032,Luca,Dubois,luca.dubois32@example.com,IT22T7923922665573652500032,fixed_term,Finance,40,2600,0,10,2013-06-07,
 EMP-00033,Zeno,Longo,zeno.longo33@example.com,IT35J7175791943604616200033,full_time,Finance,40,2200,0,16,2020-05-02,
-EMP-00034,Dario,Nilsen,dario.nilsen34@example.com,IT93U6537503068155792100034,fixed_term,Customer Support,40,1850,0,8,2022-09-06,
+EMP-00034,Dario,Nilsen,dario.nilsen34@example.com,IT93U6537503068155792100034,part_time,Customer Support,20,1200,0,8,2022-09-06,
 EMP-00035,Alma,Nilsen,alma.nilsen35@example.com,IT95Z9263799089970551700035,full_time,Engineering,40,4000,0,10,2019-04-12,
 EMP-00036,Lorenzo,Fischer,lorenzo.fischer36@example.com,IT14T5182352638137553000036,fixed_term,Customer Support,40,1850,0,0,2018-06-17,
 EMP-00037,Luca,Lombardi,luca.lombardi37@example.com,IT26R4610809506737984100037,full_time,HR,40,3250,0,10,2012-10-26,

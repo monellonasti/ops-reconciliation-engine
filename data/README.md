@@ -40,7 +40,7 @@ Duplicates and missing data
 
 Contract changes
 
-- `EMP-00034`: part-time to full-time, hours and salary adjusted
+- `EMP-00034`: part-time (20 h, 1,200) to full-time (40 h, 2,400); a legitimate-looking change that still surfaces as a critical salary change, a contract change and an hours change
 - `EMP-00147`: contract type changed to fixed-term
 - `EMP-00108`: working hours 40 to 32
 - `EMP-00012`, `EMP-00119`: department changed

@@ -63,9 +63,10 @@ Record = dict[str, str]
 def main() -> None:
     rng = random.Random(SEED)
     previous = [base_record(index, rng) for index in range(1, EMPLOYEE_COUNT + 1)]
-    # EMP-00125 mirrors the example in the project brief (2,100 -> 3,000).
-    by_id(previous, "EMP-00125")["monthly_salary"] = "2100"
+    # Pin a few starting points so the injected scenarios are exactly as documented.
+    by_id(previous, "EMP-00125")["monthly_salary"] = "2100"  # the example in the brief
     by_id(previous, "EMP-00150")["monthly_salary"] = "2800"
+    by_id(previous, "EMP-00034").update(contract_type="part_time", working_hours="20", monthly_salary="1200")
 
     current, changes = current_cycle(previous, rng)
 
@@ -193,10 +194,8 @@ def current_cycle(previous: list[Record], rng: random.Random) -> tuple[list[Reco
     note("EMP-00012", "department changed to Marketing")
     by_id(current, "EMP-00119")["department"] = "Customer Support"
     note("EMP-00119", "department changed to Customer Support")
-    record = by_id(current, "EMP-00034")
-    record.update(contract_type="full_time", working_hours="40")
-    record["monthly_salary"] = str(round(float(record["monthly_salary"]) * 40 / float(by_id(previous, "EMP-00034")["working_hours"]) / 50) * 50)
-    note("EMP-00034", "part_time -> full_time with working hours and salary adjusted")
+    by_id(current, "EMP-00034").update(contract_type="full_time", working_hours="40", monthly_salary="2400")
+    note("EMP-00034", "part_time (20 h, 1,200) -> full_time (40 h, 2,400)")
     by_id(current, "EMP-00147")["contract_type"] = "fixed_term"
     note("EMP-00147", "contract_type changed to fixed_term")
     by_id(current, "EMP-00108")["working_hours"] = "32"
