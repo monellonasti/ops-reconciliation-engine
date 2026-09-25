@@ -1,0 +1,451 @@
+# Ops Reconciliation Engine
+
+A small internal tool that compares two recurring exports of the same dataset,
+detects what changed, what is missing, what is duplicated and what looks
+wrong, and turns the result into a review queue for a human operator.
+
+The demo uses a synthetic HR/payroll-like dataset because it is a familiar
+example of a recurring operational export. **This is not payroll software.**
+It does not calculate salaries, taxes, contributions or payslips. The same
+engine works conceptually for inventory snapshots, supplier catalogues, CRM
+exports, subscription records or any other dataset that arrives on a cycle
+and has a stable record key.
+
+![Review queue](docs/screenshot-dashboard.png)
+
+![Issue detail](docs/screenshot-detail.png)
+
+## The problem
+
+Operations teams receive the same export every week or month and have to
+answer the same questions each time: which records are new, which
+disappeared, which values changed, what is missing, what is duplicated, and
+which of those changes need a second look before anything downstream runs.
+
+Most teams do this in a spreadsheet: sort both files, VLOOKUP one against the
+other, eyeball the differences. It is slow, it is repetitive, and it is easy
+to miss the one row that matters. The checks themselves are deterministic;
+only the decision about what to do with a finding needs human judgement.
+
+## Product principle
+
+**Automate deterministic checks. Surface exceptions. Keep humans in control
+of decisions that require context.**
+
+The engine is responsible for *detection*. It compares values, applies
+configured thresholds and produces a structured, explainable finding. It is
+never responsible for the *decision*. A 40% salary increase might be a
+promotion or a typo; an IBAN change might be a legitimate request or fraud.
+The tool cannot know, so it does not pretend to. It flags, explains and
+exports, and a person decides.
+
+## Example workflow
+
+```
+Previous dataset       Current dataset
+        \                  /
+         v                v
+          Load & validate (structure, encoding, columns, types)
+                     |
+                     v
+          Reconcile (match on employee_id, compare fields)
+                     |
+                     v
+          Rules (thresholds from rules/validation_rules.yaml)
+                     |
+                     v
+          Exceptions (typed issues: severity, rule, explanation)
+                     |
+                     v
+          Human review (filterable queue, detail panel)
+                     |
+                     v
+          Export (reconciliation_report.csv, review_required.csv)
+```
+
+## Features
+
+- Loads CSV exports with encoding fallback, delimiter detection, header checks
+  (duplicate or missing columns) and per-row structure checks; every problem
+  is reported in plain language, never as a stack trace.
+- Validates each cycle on its own: required fields, numeric and date types,
+  duplicate keys, duplicate emails and IBANs, negative salaries, impossible
+  dates, end dates before start dates, malformed emails.
+- Reconciles the two cycles: new and removed records, salary changes with a
+  percentage and configurable severity bands, IBAN changes, contract type,
+  working hours and department changes, start date changes, end dates added.
+- Flags anomalies in the current cycle: bonus relative to salary, overtime
+  outside the plausible range.
+- Classifies every finding as INFO, WARNING or CRITICAL and decides whether it
+  needs human review, using a policy that lives in the rules file.
+- Presents a review queue with filters (severity, category, review required,
+  employee ID) and a detail panel that states what changed, why it was
+  flagged, which rule fired and what an operator could check.
+- Exports the full report and the review queue as CSV.
+- Masks IBANs everywhere they could appear: issues, table, snapshot, exports.
+- Optional natural-language explanation of a finding through the Claude API,
+  strictly opt-in; the application is complete without it.
+- A command-line entry point for scripted or scheduled runs.
+
+## Demo
+
+```bash
+streamlit run app.py
+```
+
+Click **Load demo dataset** (or open `http://localhost:8501/?demo=1`). The
+demo compares 200 synthetic records with the same population one cycle later,
+into which about forty changes and data problems were injected on purpose:
+salary changes at every severity, IBAN changes, a duplicated employee ID,
+missing fields, a row without a key, department and contract changes,
+excessive and negative overtime, bonus anomalies, an impossible date, a
+malformed email and a structurally broken line. `data/README.md` lists every
+injected scenario with its employee ID.
+
+Everything in `data/` is synthetic and regenerated deterministically by
+`scripts/generate_demo_data.py`.
+
+The same run from the command line:
+
+```bash
+python -m src.engine data/demo_previous.csv data/demo_current.csv --output-dir reports
+```
+
+## Architecture
+
+```
+ops-reconciliation-engine/
+├── app.py                      Streamlit UI (thin: layout, filters, session state)
+├── rules/validation_rules.yaml Business thresholds and severities
+├── src/
+│   ├── models.py               Issue, Summary, ReconciliationResult, column layout
+│   ├── config.py               YAML -> validated Rules object (Pydantic)
+│   ├── loader.py               CSV -> clean string DataFrame, structural errors
+│   ├── validators.py           Single-cycle checks; produces the typed frame
+│   ├── reconciliation.py       Cross-cycle comparison on the record key
+│   ├── anomaly_detection.py    Single-cycle bonus and overtime rules
+│   ├── engine.py               Orchestrates one run; also a small CLI
+│   ├── reporting.py            Summary counts, sorting, CSV exports
+│   ├── explain.py              Template explanations, optional LLM rewrite
+│   └── utils.py                Masking, percentage change, formatting
+├── sql/                        The same checks written as readable SQL
+├── scripts/generate_demo_data.py
+├── data/                       Synthetic demo exports
+└── tests/                      pytest suite (engine, rules, UI glue, SQL)
+```
+
+The data flows through four stages, each a plain function that takes a
+DataFrame or two and returns a list of `Issue` objects:
+
+1. **Load** (`loader.py`). Reads bytes, decodes them, finds the delimiter,
+   checks the header and row structure, normalises column names and trims
+   cells. Returns a string-typed frame plus a source line number per row.
+   File-level problems raise `DatasetLoadError` with an operator-readable
+   message; row-level problems become issues and the row is skipped.
+2. **Validate** (`validators.py`). Coerces numeric and date columns (invalid
+   cells become issues), checks required fields, duplicates and impossible
+   values. Returns the typed frame the next stages work on.
+3. **Reconcile** (`reconciliation.py`). Indexes both cycles by `employee_id`,
+   reports records that appeared or disappeared, then compares each matched
+   pair field by field. Rows without a key are left to the validators; when a
+   key repeats, the first row is used and the duplicate is a critical issue.
+4. **Detect anomalies** (`anomaly_detection.py`). Looks at the current cycle
+   alone for values that are implausible regardless of history.
+
+`engine.py` runs the four stages, sorts the issues (critical first) and builds
+the summary. `app.py` only does layout and session state; it contains no
+business logic, which is why the engine can also run from the command line or
+from a scheduler.
+
+One shape for every finding keeps everything downstream simple:
+
+```json
+{
+  "employee_id": "EMP-00125",
+  "field": "monthly_salary",
+  "previous_value": 2100.0,
+  "current_value": 3000.0,
+  "change_percentage": 42.86,
+  "rule": "salary_change",
+  "severity": "critical",
+  "requires_review": true,
+  "message": "Monthly salary increased by 42.86% (from 2,100 to 3,000)."
+}
+```
+
+Values are masked *before* they enter an `Issue`, so the table, the detail
+panel, the exports and the optional AI prompt cannot leak a full IBAN by
+forgetting to mask it.
+
+### SQL examples
+
+`sql/` contains the same operational checks as readable SQL: duplicates,
+missing records between periods, month-over-month changes and anomalies. The
+Python engine is the implementation; the SQL is there to show that these
+checks are ordinary data-literacy work that could run in a warehouse.
+`tests/test_sql.py` loads the demo CSVs into an in-memory SQLite database and
+runs every statement, so the SQL stays correct as the demo data evolves.
+
+## Business rules
+
+All thresholds and severities live in `rules/validation_rules.yaml`, read once
+into a validated `Rules` object. The rule code never contains a number.
+
+```yaml
+salary_change:
+  warning_percentage: 15        # change above this (absolute %) is a warning
+  critical_percentage: 30       # change above this is critical
+
+bonus:
+  warning_salary_ratio: 0.5
+  critical_salary_ratio: 1.0
+
+overtime:
+  minimum_hours: 0
+  warning_hours: 60
+  critical_hours: 100
+
+iban_change:
+  requires_review: true
+  severity: critical
+
+duplicates:
+  employee_id: critical
+  email: warning
+  iban: warning
+
+required_fields:
+  - employee_id
+  - first_name
+  - last_name
+  - contract_type
+  - monthly_salary
+
+review_policy:                  # which severities land in the review queue
+  info: false
+  warning: true
+  critical: true
+```
+
+Lifecycle events (new, removed, dates) and contract field changes each have
+their own severity entry, and any rule can override the review policy with an
+explicit `requires_review`. Unknown keys are rejected on load so a typo in the
+file fails loudly instead of silently reverting to a default; inverted
+thresholds are rejected too. If the file is absent the built-in defaults, which
+are identical to the shipped file, apply.
+
+The boundaries are exactly as specified: a 15.00% change is INFO, 15.01% is
+WARNING, 30.00% is WARNING, 30.01% is CRITICAL. Decreases are judged by their
+magnitude. The tests pin these boundaries.
+
+## Human-in-the-loop approach
+
+The engine distinguishes **detection** from **decision**.
+
+Detection is deterministic: the same two files and the same rules always give
+the same findings, and every finding names the rule and the threshold that
+produced it. That makes the output auditable and the behaviour predictable,
+which matters more in an operations tool than cleverness.
+
+Decision is left to the operator, on purpose. Sensitive changes are never
+auto-resolved:
+
+- an IBAN change is always critical and always reviewed, whatever else is
+  true about the record;
+- a large salary change is flagged with its percentage and the threshold it
+  crossed, not judged;
+- a duplicated employee ID is reported with the rows involved so a person can
+  say which one is right.
+
+The detail panel suggests *checks*, not conclusions ("verify the effective
+date", "confirm the account holder matches the employee"). The optional AI
+explanation follows the same rule: it may rephrase a finding, it may not say
+whether the change is legitimate, and the deterministic template is always
+there when it is off.
+
+## Why this architecture
+
+The problem is a batch comparison of two files a few hundred to a few
+hundred thousand rows long, once per cycle. A pandas pipeline of plain
+functions, one YAML file and a single-page Streamlit app cover that
+completely.
+
+A real-time, event-driven architecture could have been used, but recurring
+operational reconciliations do not require that complexity. A batch
+reconciliation model provides most of the operational value with dramatically
+lower implementation and maintenance cost: no brokers, no consumers, no state
+to keep consistent, nothing to run between cycles.
+
+Other choices worth naming:
+
+- **Pydantic for the issue model and the rules**, because typed, validated
+  objects at the two boundaries (config in, findings out) catch most mistakes
+  early and cost almost nothing.
+- **One flat list of issues** rather than per-check result types. Every
+  consumer (table, filters, exports, tests) deals with one shape.
+- **Rules in YAML, schema in code.** Thresholds change often and should not
+  need a deployment; the column layout of a dataset changes rarely and needs
+  code changes anyway.
+- **Streamlit** because the audience is internal, the interaction is simple
+  (upload, look, filter, download) and a framework with routing, auth and a
+  build step would be more to maintain than the engine itself.
+- **A small CLI next to the UI**, so the same engine can run on a schedule or
+  in a script without touching the front end.
+
+## What I deliberately did not build
+
+- **No microservices.** The whole engine is a few hundred lines of pure
+  functions; splitting them across services would add network failure modes
+  and deployment work with no gain.
+- **No distributed architecture.** A single process handles files of this
+  size in seconds. If a dataset ever needs more, a bigger machine is the
+  first answer, not a cluster.
+- **No real-time event bus.** Exports arrive on a cycle. Nothing needs to
+  react in milliseconds.
+- **No autonomous AI decision-making.** The model, when enabled, explains a
+  finding the engine has already made. It cannot accept, dismiss, reclassify
+  or hide anything, and the tool works identically without it.
+- **No payroll calculation engine.** The tool compares values it is given. It
+  has no opinion on what a salary, bonus or contribution *should* be, and
+  encodes no knowledge of any country's payroll rules.
+- **No persistence by default.** Files are processed in memory for the
+  session. Storing uploads or results would need retention rules, access
+  control and a deletion story; none of that is needed to make a comparison
+  useful, so it is left out until there is a concrete requirement.
+- **No authentication.** An internal tool run on a laptop or behind an
+  existing gateway does not need its own user database. Adding one would be
+  the wrong layer to solve access control at.
+
+## Running locally
+
+Requirements: Python 3.12 or newer.
+
+```bash
+git clone <repository-url>
+cd ops-reconciliation-engine
+python -m venv .venv
+# Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+The browser opens at `http://localhost:8501`. Click **Load demo dataset**, or
+upload your own previous and current CSV exports with the columns described
+below.
+
+Expected columns (header names are case-insensitive, spaces become
+underscores): `employee_id`, `first_name`, `last_name`, `email`, `iban`,
+`contract_type`, `department`, `working_hours`, `monthly_salary`, `bonus`,
+`overtime_hours`, `start_date`, `end_date`. The required ones are those in
+`required_fields`; the others may be absent, in which case the checks that
+depend on them are skipped and a note says so. Dates are expected as
+`YYYY-MM-DD` (configurable in the rules file).
+
+Command-line run, useful for scripts and schedulers:
+
+```bash
+python -m src.engine previous.csv current.csv --output-dir reports
+```
+
+Regenerate the demo data:
+
+```bash
+python scripts/generate_demo_data.py
+```
+
+## Running tests
+
+```bash
+python -m pytest
+```
+
+The suite covers the loader (encodings, delimiters, headers, malformed rows),
+every validation and reconciliation rule including threshold boundaries, IBAN
+masking and change detection, bonus and overtime thresholds, date validation,
+malformed data handling, rules loading, exports, the explanation templates,
+the SQL examples and the UI glue (headless, through Streamlit's `AppTest`).
+Coverage is concentrated on the engine on purpose; the Streamlit layout code
+is exercised only enough to know the demo flow, error messages and masking
+work.
+
+```bash
+python -m pytest --cov=src --cov-report=term-missing   # needs pytest-cov
+```
+
+## Privacy considerations
+
+The demo data is synthetic, but the tool is designed as if it were not:
+
+- **IBAN masking.** Bank identifiers are masked (`IT60X****3456`) before they
+  are stored in a finding, so no UI element, export or prompt receives a full
+  IBAN. The fields to mask are configured in the rules file.
+- **No persistent storage.** Uploads and results live in the Streamlit
+  session in memory and disappear when the session ends. Nothing is written
+  to disk by the app. The CLI writes only the two report files you ask for.
+- **No external calls by default.** The engine runs entirely locally. The
+  only network call the code can make is the optional AI explanation, which
+  requires an API key to be set explicitly and is triggered per finding by a
+  button. What it sends is the masked finding and the template explanation.
+- **No logging of values.** Normal operation logs counts only (rows loaded,
+  issues found). An unexpected failure is logged with its traceback for
+  debugging and shown to the operator as a generic message.
+- **Names appear in the UI** where they help an operator identify a record
+  (the record snapshot, new/removed messages). If that is not acceptable in
+  your context, add `first_name` and `last_name` to `masked_fields`.
+
+## Optional AI explanations
+
+Explanations in the detail panel are generated from templates and are always
+available. To additionally get a natural-language rewrite of a finding:
+
+```bash
+pip install anthropic
+export ANTHROPIC_API_KEY=...        # Windows: set ANTHROPIC_API_KEY=...
+streamlit run app.py
+```
+
+An **Explain this finding** button then appears in the detail panel. The
+model receives the masked finding, the rule configuration and the template
+explanation, and is instructed not to judge whether the change is correct
+and not to invent facts. If the request fails for any reason (no network,
+bad key, rate limit, refusal) the UI shows a one-line reason and the template
+explanation stands. The model can be changed with `OPS_RECON_LLM_MODEL`.
+
+## Known limitations
+
+- The record key is fixed to `employee_id` and the column layout is defined
+  in code (`src/models.py`). Using the engine for a different dataset means
+  editing that module and the rule functions that reference specific columns.
+- Numbers must use a dot as decimal separator; `2.100,50` is reported as
+  invalid rather than guessed at.
+- When an `employee_id` appears twice, the first row is used for the
+  comparison. The duplicate is reported as critical, but changes in the
+  second row are not compared.
+- A date that becomes unparseable is reported twice, once as an invalid value
+  and once as a change to empty. This is deliberate (the second finding
+  survives even if the date column is not required) but adds a line to the
+  queue.
+- Runs are not stored, so there is no history and no "was this already
+  reviewed last cycle" state.
+- The UI has been exercised with a few hundred rows. Files with hundreds of
+  thousands of rows will still reconcile quickly, but the review table is not
+  paginated.
+
+## Future improvements
+
+None of these exist today.
+
+- Configurable schemas: declare the key field, column types and masked
+  fields per dataset so the same engine serves inventory or CRM exports
+  without code changes.
+- Reusable reconciliation templates: a rules file per dataset type.
+- Connectors that pull the two cycles from an API, a database or object
+  storage instead of manual uploads.
+- Scheduled reconciliations with a notification when the review queue is not
+  empty.
+- Role-based access control if the tool moves behind a shared deployment.
+- Reconciliation history: keep past runs so an operator can mark a finding as
+  reviewed and see it suppressed or flagged again next cycle.
+- Anomaly trend analysis across cycles (a salary that drifts 10% every month
+  is more interesting than any single 10% change).
+- Pagination and column sorting in the review table for very large exports.
