@@ -1,0 +1,77 @@
+# Business rules for the Ops Reconciliation Engine.
+#
+# Everything an operations lead might want to tune lives here. The Python code
+# reads these values through src/config.py and never hardcodes a threshold.
+# Severities are one of: info, warning, critical.
+
+# Fields that must be present and non-empty on every record.
+# employee_id is the record key and is always required, even if removed here.
+required_fields:
+  - employee_id
+  - first_name
+  - last_name
+  - contract_type
+  - monthly_salary
+
+# Whether an issue of a given severity lands in the human review queue.
+# Individual rules can override this with an explicit requires_review flag.
+review_policy:
+  info: false
+  warning: true
+  critical: true
+
+missing_data:
+  severity: critical
+
+invalid_values:
+  severity: critical            # invalid numbers/dates, negative salary, end before start
+  malformed_email_severity: warning
+
+duplicates:
+  employee_id: critical
+  email: warning
+  iban: warning
+
+salary_change:
+  warning_percentage: 15        # change above this (in absolute %) is a warning
+  critical_percentage: 30       # change above this is critical
+
+bonus:
+  warning_salary_ratio: 0.5     # bonus above 50% of monthly salary
+  critical_salary_ratio: 1.0    # bonus above 100% of monthly salary
+
+overtime:
+  minimum_hours: 0              # below this is critical (negative overtime)
+  warning_hours: 60
+  critical_hours: 100
+
+iban_change:
+  requires_review: true
+  severity: critical
+
+contract_changes:
+  contract_type:
+    severity: warning
+  working_hours:
+    severity: warning
+  department:
+    severity: info
+
+lifecycle:
+  new_record:
+    severity: info
+  removed_record:
+    severity: warning
+  start_date_changed:
+    severity: warning
+  end_date_added:
+    severity: warning
+  end_date_changed:
+    severity: warning
+
+# Columns whose values must never be displayed or exported in full.
+masked_fields:
+  - iban
+
+# Expected date format in the CSV files (Python strptime syntax).
+date_format: "%Y-%m-%d"

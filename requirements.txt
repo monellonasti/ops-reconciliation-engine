@@ -1,0 +1,12 @@
+# Runtime
+pandas>=2.2
+streamlit>=1.40
+pydantic>=2.6
+PyYAML>=6.0
+
+# Tests
+pytest>=8.0
+
+# Optional: natural-language explanations via the Claude API.
+# The application works fully without it. Install with: pip install anthropic
+# anthropic>=1.0
