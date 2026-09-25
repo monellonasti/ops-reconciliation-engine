@@ -25,6 +25,9 @@ from src.utils import (
 )
 from src.validators import ValidatedDataset
 
+Row = dict[str, Any]
+Records = dict[str, Row]
+
 
 def reconcile(previous: ValidatedDataset, current: ValidatedDataset, rules: Rules) -> list[Issue]:
     """Compare two validated cycles and return every lifecycle and field-change issue."""
@@ -34,24 +37,24 @@ def reconcile(previous: ValidatedDataset, current: ValidatedDataset, rules: Rule
     issues: list[Issue] = []
     issues += detect_new_records(before, after, rules)
     issues += detect_removed_records(before, after, rules)
-    for key in before.index.intersection(after.index).sort_values():
-        issues += compare_record(key, before.loc[key], after.loc[key], rules)
+    for key in sorted(before.keys() & after.keys()):
+        issues += compare_record(key, before[key], after[key], rules)
     return issues
 
 
-def index_by_key(frame: pd.DataFrame) -> pd.DataFrame:
+def index_by_key(frame: pd.DataFrame) -> Records:
     """One row per key: rows without a key are dropped, repeated keys keep the first row."""
     keys = frame[KEY_FIELD].map(normalize_text)
     keyed = frame.loc[keys.notna()].copy()
     keyed[KEY_FIELD] = keys[keys.notna()]
     keyed = keyed.drop_duplicates(subset=KEY_FIELD, keep="first")
-    return keyed.set_index(KEY_FIELD)
+    return keyed.set_index(KEY_FIELD).to_dict("index")
 
 
 # --- lifecycle -----------------------------------------------------------------
 
 
-def detect_new_records(before: pd.DataFrame, after: pd.DataFrame, rules: Rules) -> list[Issue]:
+def detect_new_records(before: Records, after: Records, rules: Rules) -> list[Issue]:
     outcome = rules.lifecycle.new_record
     return [
         _lifecycle_issue(
@@ -60,13 +63,13 @@ def detect_new_records(before: pd.DataFrame, after: pd.DataFrame, rules: Rules) 
             rule="new_record",
             outcome=outcome,
             rules=rules,
-            message=f"New record{_name_suffix(after.loc[key])}: not present in the previous cycle.",
+            message=f"New record{_name_suffix(after[key])}: not present in the previous cycle.",
         )
-        for key in after.index.difference(before.index)
+        for key in sorted(after.keys() - before.keys())
     ]
 
 
-def detect_removed_records(before: pd.DataFrame, after: pd.DataFrame, rules: Rules) -> list[Issue]:
+def detect_removed_records(before: Records, after: Records, rules: Rules) -> list[Issue]:
     outcome = rules.lifecycle.removed_record
     return [
         _lifecycle_issue(
@@ -75,16 +78,17 @@ def detect_removed_records(before: pd.DataFrame, after: pd.DataFrame, rules: Rul
             rule="removed_record",
             outcome=outcome,
             rules=rules,
-            message=f"Record removed{_name_suffix(before.loc[key])}: present in the previous cycle only.",
+            message=(
+                f"Record removed{_name_suffix(before[key])}: present in the previous cycle only."
+            ),
         )
-        for key in before.index.difference(after.index)
+        for key in sorted(before.keys() - after.keys())
     ]
 
 
-def _name_suffix(row: pd.Series) -> str:
-    name = " ".join(
-        part for part in (normalize_text(row.get("first_name")), normalize_text(row.get("last_name"))) if part
-    )
+def _name_suffix(row: Row) -> str:
+    parts = (normalize_text(row.get("first_name")), normalize_text(row.get("last_name")))
+    name = " ".join(part for part in parts if part)
     return f" ({name})" if name else ""
 
 
@@ -106,7 +110,7 @@ def _lifecycle_issue(
 # --- matched records -----------------------------------------------------------
 
 
-def compare_record(key: str, before: pd.Series, after: pd.Series, rules: Rules) -> list[Issue]:
+def compare_record(key: str, before: Row, after: Row, rules: Rules) -> list[Issue]:
     """All field-level differences between the two versions of one record."""
     issues: list[Issue] = []
     issues += compare_salary(key, before, after, rules)
@@ -132,7 +136,7 @@ def salary_change_severity(change_percentage: float, rules: Rules) -> Severity:
     return Severity.INFO
 
 
-def compare_salary(key: str, before: pd.Series, after: pd.Series, rules: Rules) -> list[Issue]:
+def compare_salary(key: str, before: Row, after: Row, rules: Rules) -> list[Issue]:
     field = "monthly_salary"
     prev, curr = before.get(field), after.get(field)
     if is_missing(curr) or _same(prev, curr):
@@ -153,7 +157,10 @@ def compare_salary(key: str, before: pd.Series, after: pd.Series, rules: Rules) 
             _change_issue(
                 key, field, prev, curr, rules,
                 category=Category.SALARY_CHANGE, rule="salary_change", severity=Severity.WARNING,
-                message=f"Monthly salary changed from 0 to {format_value(curr)}; percentage not meaningful.",
+                message=(
+                    f"Monthly salary changed from 0 to {format_value(curr)}; "
+                    "percentage not meaningful."
+                ),
             )
         ]
 
@@ -171,7 +178,7 @@ def compare_salary(key: str, before: pd.Series, after: pd.Series, rules: Rules) 
     ]
 
 
-def compare_iban(key: str, before: pd.Series, after: pd.Series, rules: Rules) -> list[Issue]:
+def compare_iban(key: str, before: Row, after: Row, rules: Rules) -> list[Issue]:
     prev, curr = before.get("iban"), after.get("iban")
     prev_norm, curr_norm = normalize_iban(prev), normalize_iban(curr)
     if prev_norm == curr_norm:
@@ -196,7 +203,7 @@ def compare_iban(key: str, before: pd.Series, after: pd.Series, rules: Rules) ->
 
 
 def compare_field(
-    key: str, before: pd.Series, after: pd.Series, field: str, outcome: RuleOutcome, rules: Rules
+    key: str, before: Row, after: Row, field: str, outcome: RuleOutcome, rules: Rules
 ) -> list[Issue]:
     """Generic change detection for one column, with the outcome taken from the rules."""
     prev, curr = before.get(field), after.get(field)
@@ -214,7 +221,7 @@ def compare_field(
     ]
 
 
-def compare_dates(key: str, before: pd.Series, after: pd.Series, rules: Rules) -> list[Issue]:
+def compare_dates(key: str, before: Row, after: Row, rules: Rules) -> list[Issue]:
     issues: list[Issue] = []
     lifecycle = rules.lifecycle
 

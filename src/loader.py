@@ -64,8 +64,10 @@ def load_dataset(
     delimiter = _detect_delimiter(text)
     header, rows, issues = _parse_rows(text, delimiter, name, rules)
 
-    frame = pd.DataFrame([cells for _, cells in rows], columns=header, dtype=object)
-    frame = frame.map(_clean_cell)
+    # Plain Python objects (None for blanks) on purpose: the rule functions iterate
+    # row by row, and object columns are much cheaper to iterate than Arrow strings.
+    cleaned = [[_clean_cell(cell) for cell in cells] for _, cells in rows]
+    frame = pd.DataFrame(cleaned, columns=header, dtype=object)
     frame[SOURCE_ROW] = [line_number for line_number, _ in rows]
 
     frame, column_notes = _align_columns(frame, rules)

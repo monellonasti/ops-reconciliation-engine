@@ -3,6 +3,10 @@
 These checks look at one cycle in isolation. They also produce the *typed*
 frame (numbers as floats, dates as timestamps) that the cross-cycle
 reconciliation works on.
+
+Rule functions receive rows as plain dicts (one conversion per dataset)
+rather than indexing into the DataFrame per row, which keeps runs on large
+exports in the seconds rather than minutes.
 """
 
 from __future__ import annotations
@@ -47,6 +51,10 @@ class ValidatedDataset:
     def record_count(self) -> int:
         return len(self.frame)
 
+    @property
+    def records(self) -> list[Row]:
+        return self.frame.to_dict("records")
+
 
 def validate_dataset(loaded: LoadedDataset, rules: Rules) -> ValidatedDataset:
     """Run every single-dataset check and return the typed frame plus its issues."""
@@ -55,11 +63,12 @@ def validate_dataset(loaded: LoadedDataset, rules: Rules) -> ValidatedDataset:
     issues: list[Issue] = []
     issues += coerce_numeric_columns(typed, loaded.name, rules)
     issues += coerce_date_columns(typed, loaded.name, rules)
-    # Required-field checks run on the raw frame so an unparseable number is
-    # reported once (as invalid), not twice (invalid and missing).
-    issues += check_required_fields(raw, loaded.name, rules)
-    issues += check_duplicates(raw, loaded.name, rules)
-    issues += check_value_ranges(typed, loaded.name, rules)
+    # Required-field and duplicate checks run on the raw rows so an unparseable
+    # number is reported once (as invalid), not twice (invalid and missing).
+    raw_rows = raw.to_dict("records")
+    issues += check_required_fields(raw_rows, loaded.name, rules)
+    issues += check_duplicates(raw_rows, loaded.name, rules)
+    issues += check_value_ranges(typed.to_dict("records"), loaded.name, rules)
     return ValidatedDataset(name=loaded.name, frame=typed, issues=issues)
 
 
@@ -159,16 +168,21 @@ def coerce_date_columns(frame: pd.DataFrame, dataset: str, rules: Rules) -> list
 # --- required fields ---------------------------------------------------------
 
 
-def check_required_fields(frame: pd.DataFrame, dataset: str, rules: Rules) -> list[Issue]:
+def check_required_fields(rows: list[Row], dataset: str, rules: Rules) -> list[Issue]:
     factory = IssueFactory(dataset, rules)  # type: ignore[arg-type]
     issues: list[Issue] = []
-    columns = [column for column in rules.required_fields if column in frame.columns]
-    for row in frame.to_dict("records"):
+    if not rows:
+        return issues
+    columns = [column for column in rules.required_fields if column in rows[0]]
+    for row in rows:
         for column in columns:
             if not is_missing(row[column]):
                 continue
             if column == KEY_FIELD:
-                message = "Required field employee_id is empty; the record cannot be matched across cycles."
+                message = (
+                    "Required field employee_id is empty; "
+                    "the record cannot be matched across cycles."
+                )
             else:
                 message = f"Required field {column} is empty."
             issues.append(
@@ -187,11 +201,11 @@ def check_required_fields(frame: pd.DataFrame, dataset: str, rules: Rules) -> li
 # --- duplicates ----------------------------------------------------------------
 
 
-def check_duplicates(frame: pd.DataFrame, dataset: str, rules: Rules) -> list[Issue]:
+def check_duplicates(rows: list[Row], dataset: str, rules: Rules) -> list[Issue]:
     issues: list[Issue] = []
-    issues += _duplicate_keys(frame, dataset, rules)
+    issues += _duplicate_keys(rows, dataset, rules)
     issues += _duplicate_values(
-        frame,
+        rows,
         dataset,
         rules,
         column="email",
@@ -199,7 +213,7 @@ def check_duplicates(frame: pd.DataFrame, dataset: str, rules: Rules) -> list[Is
         severity=rules.duplicates.email,
     )
     issues += _duplicate_values(
-        frame,
+        rows,
         dataset,
         rules,
         column="iban",
@@ -210,40 +224,38 @@ def check_duplicates(frame: pd.DataFrame, dataset: str, rules: Rules) -> list[Is
 
 
 def _group_rows(
-    frame: pd.DataFrame, column: str, normalize: Callable[[Any], str | None]
+    rows: list[Row], column: str, normalize: Callable[[Any], str | None]
 ) -> dict[str, list[Row]]:
     """Rows sharing the same normalized value, only for values seen more than once."""
-    if column not in frame.columns:
-        return {}
     groups: dict[str, list[Row]] = defaultdict(list)
-    for row in frame.to_dict("records"):
+    for row in rows:
         key = normalize(row.get(column))
         if key is not None:
             groups[key].append(row)
-    return {key: rows for key, rows in groups.items() if len(rows) > 1}
+    return {key: group for key, group in groups.items() if len(group) > 1}
 
 
-def _duplicate_keys(frame: pd.DataFrame, dataset: str, rules: Rules) -> list[Issue]:
+def _duplicate_keys(rows: list[Row], dataset: str, rules: Rules) -> list[Issue]:
     factory = IssueFactory(dataset, rules)  # type: ignore[arg-type]
     issues: list[Issue] = []
-    for key, rows in _group_rows(frame, KEY_FIELD, normalize_text).items():
-        row_list = ", ".join(str(row[SOURCE_ROW]) for row in rows)
+    for key, group in _group_rows(rows, KEY_FIELD, normalize_text).items():
+        row_list = ", ".join(str(row[SOURCE_ROW]) for row in group)
         issues.append(
             factory.issue(
-                rows[0],
+                group[0],
                 category=Category.DUPLICATE,
                 field=KEY_FIELD,
                 rule="duplicate_employee_id",
                 severity=rules.duplicates.employee_id,
                 value=key,
-                message=f"employee_id {key} appears {len(rows)} times (rows {row_list}).",
+                message=f"employee_id {key} appears {len(group)} times (rows {row_list}).",
             )
         )
     return issues
 
 
 def _duplicate_values(
-    frame: pd.DataFrame,
+    rows: list[Row],
     dataset: str,
     rules: Rules,
     *,
@@ -253,11 +265,11 @@ def _duplicate_values(
 ) -> list[Issue]:
     factory = IssueFactory(dataset, rules)  # type: ignore[arg-type]
     issues: list[Issue] = []
-    for _, rows in _group_rows(frame, column, normalize).items():
-        if len({_label(row) for row in rows}) < 2:
+    for group in _group_rows(rows, column, normalize).values():
+        if len({_label(row) for row in group}) < 2:
             continue  # the same record exported twice: already a duplicate-key issue
-        for row in rows:
-            others = sorted({_label(other) for other in rows if _label(other) != _label(row)})
+        for row in group:
+            others = sorted({_label(other) for other in group if _label(other) != _label(row)})
             issues.append(
                 factory.issue(
                     row,
@@ -280,12 +292,12 @@ def _label(row: Row) -> str:
 # --- value ranges --------------------------------------------------------------
 
 
-def check_value_ranges(frame: pd.DataFrame, dataset: str, rules: Rules) -> list[Issue]:
-    """Values that parse fine but cannot be right."""
+def check_value_ranges(rows: list[Row], dataset: str, rules: Rules) -> list[Issue]:
+    """Values that parse fine but cannot be right. Expects typed rows."""
     factory = IssueFactory(dataset, rules)  # type: ignore[arg-type]
     severity = rules.invalid_values.severity
     issues: list[Issue] = []
-    for row in frame.to_dict("records"):
+    for row in rows:
         salary = row.get("monthly_salary")
         if not is_missing(salary) and salary < 0:
             issues.append(
