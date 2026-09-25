@@ -7,7 +7,7 @@ shape. The UI, the exports and the tests all consume that single model.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,7 +33,7 @@ SOURCE_ROW = "source_row"
 DatasetName = Literal["previous", "current", "both"]
 
 
-class Severity(str, Enum):
+class Severity(StrEnum):
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
@@ -43,7 +43,7 @@ class Severity(str, Enum):
         return {"info": 0, "warning": 1, "critical": 2}[self.value]
 
 
-class Category(str, Enum):
+class Category(StrEnum):
     LIFECYCLE = "lifecycle"
     DUPLICATE = "duplicate"
     MISSING_DATA = "missing_data"

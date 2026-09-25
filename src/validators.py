@@ -8,8 +8,10 @@ reconciliation works on.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from collections.abc import Callable
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -39,7 +41,7 @@ Row = dict[str, Any]
 class ValidatedDataset:
     name: Literal["previous", "current"]
     frame: pd.DataFrame
-    issues: list[Issue] = field(default_factory=list)
+    issues: list[Issue] = dataclass_field(default_factory=list)
 
     @property
     def record_count(self) -> int:

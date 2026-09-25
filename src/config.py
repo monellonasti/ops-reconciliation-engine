@@ -57,7 +57,7 @@ class SalaryChangeRules(_StrictModel):
     critical_percentage: float = 30.0
 
     @model_validator(mode="after")
-    def _ordered(self) -> "SalaryChangeRules":
+    def _ordered(self) -> SalaryChangeRules:
         if not 0 <= self.warning_percentage < self.critical_percentage:
             raise ValueError("warning_percentage must be below critical_percentage")
         return self
@@ -68,7 +68,7 @@ class BonusRules(_StrictModel):
     critical_salary_ratio: float = 1.0
 
     @model_validator(mode="after")
-    def _ordered(self) -> "BonusRules":
+    def _ordered(self) -> BonusRules:
         if not 0 <= self.warning_salary_ratio < self.critical_salary_ratio:
             raise ValueError("warning_salary_ratio must be below critical_salary_ratio")
         return self
@@ -80,7 +80,7 @@ class OvertimeRules(_StrictModel):
     critical_hours: float = 100.0
 
     @model_validator(mode="after")
-    def _ordered(self) -> "OvertimeRules":
+    def _ordered(self) -> OvertimeRules:
         if not self.minimum_hours <= self.warning_hours < self.critical_hours:
             raise ValueError("expected minimum_hours <= warning_hours < critical_hours")
         return self
@@ -135,7 +135,7 @@ class Rules(_StrictModel):
     date_format: str = "%Y-%m-%d"
 
     @model_validator(mode="after")
-    def _key_always_required(self) -> "Rules":
+    def _key_always_required(self) -> Rules:
         if KEY_FIELD not in self.required_fields:
             self.required_fields.insert(0, KEY_FIELD)
         return self

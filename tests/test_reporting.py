@@ -107,7 +107,7 @@ def test_exports_are_utf8_with_bom_and_reviews_are_a_subset(make_loaded, rules):
     full = full_report_csv(result)
     review = review_queue_csv(result)
 
-    assert full.startswith("﻿".encode("utf-8"))
+    assert full.startswith("﻿".encode())
     full_frame = pd.read_csv(io.BytesIO(full))
     review_frame = pd.read_csv(io.BytesIO(review))
     assert len(full_frame) == 2

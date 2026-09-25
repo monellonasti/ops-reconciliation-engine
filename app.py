@@ -16,7 +16,15 @@ from src.config import DEFAULT_RULES_PATH, REPO_ROOT, Rules, RulesConfigError, l
 from src.engine import run_reconciliation
 from src.explain import explain_issue, explain_with_llm, llm_available
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
-from src.models import EXPECTED_COLUMNS, KEY_FIELD, SOURCE_ROW, Category, Issue, ReconciliationResult, Severity
+from src.models import (
+    EXPECTED_COLUMNS,
+    KEY_FIELD,
+    SOURCE_ROW,
+    Category,
+    Issue,
+    ReconciliationResult,
+    Severity,
+)
 from src.reporting import full_report_csv, review_queue_csv
 from src.utils import display_value, format_percentage, format_value
 

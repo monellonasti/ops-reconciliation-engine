@@ -11,7 +11,7 @@ import pytest
 from src import explain as explain_module
 from src.config import REPO_ROOT
 from src.engine import reconcile_sources
-from src.explain import Explanation, explain_issue, explain_with_llm, llm_available
+from src.explain import explain_issue, explain_with_llm, llm_available
 from src.models import Category, Issue, Severity
 
 
