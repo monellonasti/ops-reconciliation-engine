@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -107,3 +107,16 @@ def to_display_value(value: Any) -> str | float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return str(value)
+
+
+def display_value(field: str | None, value: Any, masked_fields: Iterable[str]) -> str | float | None:
+    """Value as it may appear in issues, exports and the UI.
+
+    Fields listed in ``masked_fields`` are never shown in full. IBANs keep a
+    recognisable prefix and suffix; any other masked field is hidden entirely.
+    """
+    if is_missing(value):
+        return None
+    if field is not None and field in set(masked_fields):
+        return mask_iban(value) if field == "iban" else "****"
+    return to_display_value(value)
