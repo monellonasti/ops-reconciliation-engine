@@ -53,7 +53,7 @@ def test_demo_dataset_fills_summary_table_and_exports():
         element.value for element in at.dataframe if "Employee ID" in element.value.columns
     )
     assert list(review_table.columns) == [
-        "Employee ID", "Category", "Field", "Previous", "Current", "Change",
+        "Employee ID", "Cycle", "Source row", "Category", "Field", "Previous", "Current", "Change",
         "Severity", "Review Required", "Explanation",
     ]
     assert len(review_table) == 46
@@ -79,6 +79,37 @@ def test_reset_clears_the_result():
 
     assert not at.exception
     assert at.metric == []
+
+
+def test_reset_from_demo_link_does_not_reload_demo():
+    at = AppTest.from_file(APP_PATH, default_timeout=60)
+    at.query_params["demo"] = "1"
+    at.run()
+    assert at.metric
+    at = click_button(at, "Reset session")
+    assert not at.exception and at.metric == []
+    assert "demo" not in at.query_params
+
+
+def test_filters_and_no_matches_state():
+    at = click_button(run_app(), "Load demo dataset")
+    at.multiselect[0].set_value([Severity.CRITICAL]).run()
+    table = next(d.value for d in at.dataframe if "Employee ID" in d.value.columns)
+    assert set(table.Severity) == {"🔴 Critical"}
+    at.text_input[0].set_value("NO-SUCH-EMPLOYEE").run()
+    assert any("No findings match" in info.value for info in at.info)
+    assert not at.exception
+
+
+def test_changed_rules_invalidate_existing_results(monkeypatch):
+    from src import config
+    at = click_button(run_app(), "Load demo dataset")
+    monkeypatch.setattr(config, "load_rules", lambda: config.Rules(
+        salary_change={"warning_percentage": 5, "critical_percentage": 10}
+    ))
+    at.run()
+    assert not at.exception and not at.metric
+    assert any("Rules changed" in info.value for info in at.info)
 
 
 # --- glue functions -------------------------------------------------------------------
@@ -180,6 +211,8 @@ def test_issues_table_formats_values_for_operators():
 
     assert table.iloc[0].to_dict() == {
         "Employee ID": "EMP-00125",
+        "Cycle": "both",
+        "Source row": "",
         "Category": "Salary change",
         "Field": "monthly_salary",
         "Previous": "2,100",

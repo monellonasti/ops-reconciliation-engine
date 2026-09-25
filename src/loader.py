@@ -18,6 +18,7 @@ import pandas as pd
 
 from src.config import Rules
 from src.models import EXPECTED_COLUMNS, KEY_FIELD, SOURCE_ROW, Category, Issue
+from src.utils import redact_iban_text
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,9 @@ _DELIMITERS = (",", ";", "\t", "|")
 class DatasetLoadError(Exception):
     """A problem with the file itself. The message is written for the operator."""
 
+    def __init__(self, message: str):
+        super().__init__(redact_iban_text(message))
+
 
 @dataclass
 class LoadedDataset:
@@ -35,6 +39,7 @@ class LoadedDataset:
     frame: pd.DataFrame
     issues: list[Issue] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    missing_columns: set[str] = field(default_factory=set)
 
     @property
     def record_count(self) -> int:
@@ -57,6 +62,8 @@ def load_dataset(
         raise DatasetLoadError("The file is empty.")
 
     text, encoding = _decode(raw)
+    if "\x00" in text:
+        raise DatasetLoadError("The file contains NUL characters. Save it as UTF-8 CSV and retry.")
     notes: list[str] = []
     if encoding != "utf-8-sig":
         notes.append(f"File was not UTF-8; decoded as {encoding}.")
@@ -74,7 +81,10 @@ def load_dataset(
     notes.extend(column_notes)
 
     logger.info("Loaded %s dataset: %d rows, %d skipped", name, len(frame), len(issues))
-    return LoadedDataset(name=name, frame=frame, issues=issues, notes=notes)
+    return LoadedDataset(
+        name=name, frame=frame, issues=issues, notes=[redact_iban_text(note) for note in notes],
+        missing_columns=set(EXPECTED_COLUMNS) - set(header),
+    )
 
 
 # --- reading ---------------------------------------------------------------
@@ -119,7 +129,7 @@ def _detect_delimiter(text: str) -> str:
 def _parse_rows(
     text: str, delimiter: str, name: str, rules: Rules
 ) -> tuple[list[str], list[tuple[int, list[str]]], list[Issue]]:
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter, strict=True)
     try:
         header_cells = next(reader)
     except StopIteration as exc:
@@ -156,6 +166,8 @@ def _normalize_column_name(cell: str) -> str:
 
 
 def _check_header(header: list[str]) -> None:
+    if SOURCE_ROW in header:
+        raise DatasetLoadError("Header contains reserved column source_row; rename it before uploading.")
     if not any(header):
         raise DatasetLoadError("The file has no header row.")
     blanks = [index + 1 for index, name in enumerate(header) if not name]

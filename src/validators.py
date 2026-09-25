@@ -11,6 +11,7 @@ exports in the seconds rather than minutes.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from src.utils import (
     is_valid_email,
     normalize_iban,
     normalize_text,
+    redact_message,
 )
 
 Row = dict[str, Any]
@@ -46,6 +48,7 @@ class ValidatedDataset:
     name: Literal["previous", "current"]
     frame: pd.DataFrame
     issues: list[Issue] = dataclass_field(default_factory=list)
+    missing_columns: set[str] = dataclass_field(default_factory=set)
 
     @property
     def record_count(self) -> int:
@@ -69,7 +72,9 @@ def validate_dataset(loaded: LoadedDataset, rules: Rules) -> ValidatedDataset:
     issues += check_required_fields(raw_rows, loaded.name, rules)
     issues += check_duplicates(raw_rows, loaded.name, rules)
     issues += check_value_ranges(typed.to_dict("records"), loaded.name, rules)
-    return ValidatedDataset(name=loaded.name, frame=typed, issues=issues)
+    return ValidatedDataset(
+        name=loaded.name, frame=typed, issues=issues, missing_columns=loaded.missing_columns
+    )
 
 
 class IssueFactory:
@@ -102,7 +107,7 @@ class IssueFactory:
             rule=rule,
             severity=severity,
             requires_review=self.rules.requires_review(severity, requires_review),
-            message=message,
+            message=redact_message(message, [row], self.rules.masked_fields),
             **values,
         )
 
@@ -119,7 +124,7 @@ def coerce_numeric_columns(frame: pd.DataFrame, dataset: str, rules: Rules) -> l
             continue
         raw = frame[column]
         numeric = pd.to_numeric(raw, errors="coerce")
-        invalid = raw.notna() & numeric.isna()
+        invalid = raw.notna() & ~numeric.map(math.isfinite)
         for row in frame.loc[invalid].to_dict("records"):
             issues.append(
                 factory.issue(
@@ -129,10 +134,10 @@ def coerce_numeric_columns(frame: pd.DataFrame, dataset: str, rules: Rules) -> l
                     rule="invalid_number",
                     severity=rules.invalid_values.severity,
                     value=row[column],
-                    message=f"{column} has a non-numeric value '{row[column]}'.",
+                    message=f"{column} has an invalid or non-finite numeric value.",
                 )
             )
-        frame[column] = numeric.astype("float64")
+        frame[column] = numeric.mask(invalid).astype("float64")
     return issues
 
 
@@ -247,6 +252,7 @@ def _duplicate_keys(rows: list[Row], dataset: str, rules: Rules) -> list[Issue]:
                 field=KEY_FIELD,
                 rule="duplicate_employee_id",
                 severity=rules.duplicates.employee_id,
+                requires_review=True,
                 value=key,
                 message=f"employee_id {key} appears {len(group)} times (rows {row_list}).",
             )

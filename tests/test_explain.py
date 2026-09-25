@@ -189,3 +189,9 @@ def test_llm_errors_become_one_line_messages(fake_anthropic, rules):
 
     fake_anthropic.install(errors.APIStatusError())
     assert "status 500" in explain_with_llm(make_issue(), rules)
+
+
+def test_unexpected_llm_failure_is_private(fake_anthropic, rules, caplog):
+    fake_anthropic.install(RuntimeError("PrivateValue"))
+    assert "template explanation applies" in explain_with_llm(make_issue(), rules)
+    assert "PrivateValue" not in caplog.text

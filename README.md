@@ -66,8 +66,8 @@ Previous dataset       Current dataset
 ## Features
 
 - Loads CSV exports with encoding fallback, delimiter detection, header checks
-  (duplicate or missing columns) and per-row structure checks; every problem
-  is reported in plain language, never as a stack trace.
+  (duplicate or missing columns) and per-row structure checks; common input problems
+  are reported in plain language.
 - Validates each cycle on its own: required fields, numeric and date types,
   duplicate keys, duplicate emails and IBANs, negative salaries, impossible
   dates, end dates before start dates, malformed emails.
@@ -82,7 +82,9 @@ Previous dataset       Current dataset
   employee ID) and a detail panel that states what changed, why it was
   flagged, which rule fired and what an operator could check.
 - Exports the full report and the review queue as CSV.
-- Masks IBANs everywhere they could appear: issues, table, snapshot, exports.
+- Masks the IBAN field in findings, tables, snapshots and exports; also redacts
+  recognizable IBAN text misplaced in other fields. Configured sensitive fields
+  are hidden in both value columns and finding messages.
 - Optional natural-language explanation of a finding through the Claude API,
   strictly opt-in; the application is complete without it.
 - A command-line entry point for scripted or scheduled runs.
@@ -148,7 +150,9 @@ DataFrame or two and returns a list of `Issue` objects:
 3. **Reconcile** (`reconciliation.py`). Indexes both cycles by `employee_id`,
    reports records that appeared or disappeared, then compares each matched
    pair field by field. Rows without a key are left to the validators; when a
-   key repeats, the first row is used and the duplicate is a critical issue.
+   key repeats in either cycle, it is excluded from cross-cycle comparisons in
+   both cycles and reported as critical, requiring review. All candidate rows
+   remain available in the detail snapshot.
 4. **Detect anomalies** (`anomaly_detection.py`). Looks at the current cycle
    alone for values that are implausible regardless of history.
 
@@ -165,7 +169,7 @@ One shape for every finding keeps everything downstream simple:
   "field": "monthly_salary",
   "previous_value": 2100.0,
   "current_value": 3000.0,
-  "change_percentage": 42.86,
+  "change_percentage": 42.857143,
   "rule": "salary_change",
   "severity": "critical",
   "requires_review": true,
@@ -173,9 +177,10 @@ One shape for every finding keeps everything downstream simple:
 }
 ```
 
-Values are masked *before* they enter an `Issue`, so the table, the detail
-panel, the exports and the optional AI prompt cannot leak a full IBAN by
-forgetting to mask it.
+Value and message builders apply configured field masking. The `Issue` model
+also redacts recognizable IBAN text as a defensive output boundary. This is
+not general secret detection: do not put unrelated confidential information
+in arbitrary text fields.
 
 ### SQL examples
 
@@ -188,8 +193,12 @@ runs every statement, so the SQL stays correct as the demo data evolves.
 
 ## Business rules
 
-All thresholds and severities live in `rules/validation_rules.yaml`, read once
-into a validated `Rules` object. The rule code never contains a number.
+Business thresholds, required fields, review policy and configurable rule
+outcomes live in `rules/validation_rules.yaml`, loaded into a validated `Rules`
+object. Salary/bonus/overtime severity bands and zero-baseline salary handling
+are fixed application semantics. IBAN changes must stay critical and require
+review; duplicate IDs must stay critical and require review. Unsafe overrides
+are rejected, and IBAN masking is always enabled.
 
 ```yaml
 salary_change:
@@ -228,15 +237,17 @@ review_policy:                  # which severities land in the review queue
 ```
 
 Lifecycle events (new, removed, dates) and contract field changes each have
-their own severity entry, and any rule can override the review policy with an
-explicit `requires_review`. Unknown keys are rejected on load so a typo in the
+their own severity entry and optional `requires_review` override. Unknown keys are rejected on load so a typo in the
 file fails loudly instead of silently reverting to a default; inverted
 thresholds are rejected too. If the file is absent the built-in defaults, which
 are identical to the shipped file, apply.
 
-The boundaries are exactly as specified: a 15.00% change is INFO, 15.01% is
-WARNING, 30.00% is WARNING, 30.01% is CRITICAL. Decreases are judged by their
-magnitude. The tests pin these boundaries.
+Classification uses the unrounded percentage: exactly 15% is INFO, 15.0001%
+is WARNING, exactly 30% is WARNING, and 30.0001% is CRITICAL. Decreases are
+judged by magnitude. Exports keep six decimal places of percentage precision.
+Messages show two decimals, except when that rounding would land exactly on a
+configured threshold while the true value does not: a 15.0001% change is
+written as 15.0001%, never as 15.00%.
 
 ## Human-in-the-loop approach
 
@@ -265,10 +276,10 @@ there when it is off.
 
 ## Why this architecture
 
-The problem is a batch comparison of two files a few hundred to a few
-hundred thousand rows long, once per cycle. A pandas pipeline of plain
-functions, one YAML file and a single-page Streamlit app cover that
-completely.
+The problem is a batch comparison of two recurring files, once per cycle.
+A pandas pipeline of plain functions, one YAML file and a single-page Streamlit
+app cover the demonstrated workload. Larger datasets need measurement on the
+intended deployment machine.
 
 A real-time, event-driven architecture could have been used, but recurring
 operational reconciliations do not require that complexity. A batch
@@ -294,12 +305,11 @@ Other choices worth naming:
 
 ## What I deliberately did not build
 
-- **No microservices.** The whole engine is a few hundred lines of pure
+- **No microservices.** The engine is a local pipeline of plain
   functions; splitting them across services would add network failure modes
   and deployment work with no gain.
-- **No distributed architecture.** A single process handles files of this
-  size in seconds. If a dataset ever needs more, a bigger machine is the
-  first answer, not a cluster.
+- **No distributed architecture.** The demonstrated workload fits a single
+  process. Measure larger workloads before choosing more infrastructure.
 - **No real-time event bus.** Exports arrive on a cycle. Nothing needs to
   react in milliseconds.
 - **No autonomous AI decision-making.** The model, when enabled, explains a
@@ -318,7 +328,8 @@ Other choices worth naming:
 
 ## Running locally
 
-Requirements: Python 3.12 or newer.
+Requirements: Python 3.12 or newer. Verified locally with Python 3.14.4 and
+Streamlit 1.64; Python 3.12 is not covered by a CI version matrix yet.
 
 ```bash
 git clone <repository-url>
@@ -337,8 +348,10 @@ Expected columns (header names are case-insensitive, spaces become
 underscores): `employee_id`, `first_name`, `last_name`, `email`, `iban`,
 `contract_type`, `department`, `working_hours`, `monthly_salary`, `bonus`,
 `overtime_hours`, `start_date`, `end_date`. The required ones are those in
-`required_fields`; the others may be absent, in which case the checks that
-depend on them are skipped and a note says so. Dates are expected as
+`required_fields`; the others may be absent. Comparisons of an absent column
+are skipped in both cycles, while single-cycle checks still use available
+values. Notes identify absent columns. Blank cells in present columns remain
+actual missing values, so an explicitly cleared IBAN is still a critical change. Dates are expected as
 `YYYY-MM-DD` (configurable in the rules file).
 
 Command-line run, useful for scripts and schedulers:
@@ -369,7 +382,9 @@ is exercised only enough to know the demo flow, error messages and masking
 work.
 
 ```bash
-python -m pytest --cov=src --cov-report=term-missing   # needs pytest-cov
+python -m pip install pytest-cov ruff
+python -m pytest --cov=src --cov-report=term-missing
+python -m ruff check .
 ```
 
 ## Privacy considerations
@@ -377,21 +392,25 @@ python -m pytest --cov=src --cov-report=term-missing   # needs pytest-cov
 The demo data is synthetic, but the tool is designed as if it were not:
 
 - **IBAN masking.** Bank identifiers are masked (`IT60X****3456`) before they
-  are stored in a finding, so no UI element, export or prompt receives a full
-  IBAN. The fields to mask are configured in the rules file.
+  are stored in a finding. Recognizable IBAN text misplaced in other fields
+  is also redacted. Additional fields to hide are configured in the rules file;
+  IBAN masking cannot be disabled. The record key must remain visible for review.
 - **No persistent storage.** Uploads and results live in the Streamlit
   session in memory and disappear when the session ends. Nothing is written
   to disk by the app. The CLI writes only the two report files you ask for.
 - **No external calls by default.** The engine runs entirely locally. The
   only network call the code can make is the optional AI explanation, which
   requires an API key to be set explicitly and is triggered per finding by a
-  button. What it sends is the masked finding and the template explanation.
+  button. Streamlit usage telemetry is disabled in `.streamlit/config.toml`. What it sends is the masked finding and the template explanation.
 - **No logging of values.** Normal operation logs counts only (rows loaded,
-  issues found). An unexpected failure is logged with its traceback for
-  debugging and shown to the operator as a generic message.
+  issues found). Unexpected failures log a generic message without exception
+  values and show an operator-friendly error.
 - **Names appear in the UI** where they help an operator identify a record
-  (the record snapshot, new/removed messages). If that is not acceptable in
-  your context, add `first_name` and `last_name` to `masked_fields`.
+  (the record snapshot, new/removed messages). Add `first_name` and `last_name`
+  to `masked_fields` to hide them. Optional AI sends the displayed finding and
+  template, which can contain other personal fields; review your configuration
+  before using it. Text cells beginning with spreadsheet formula prefixes are
+  apostrophe-prefixed in CSV exports so they are treated as text.
 
 ## Optional AI explanations
 
@@ -405,11 +424,13 @@ streamlit run app.py
 ```
 
 An **Explain this finding** button then appears in the detail panel. The
-model receives the masked finding, the rule configuration and the template
-explanation, and is instructed not to judge whether the change is correct
+model receives the masked finding and the template explanation (including
+relevant rule thresholds), and is instructed not to judge whether the change is correct
 and not to invent facts. If the request fails for any reason (no network,
 bad key, rate limit, refusal) the UI shows a one-line reason and the template
-explanation stands. The model can be changed with `OPS_RECON_LLM_MODEL`.
+explanation stands. Set `OPS_RECON_LLM_MODEL` to a model available to your account. Live provider
+compatibility has not been verified in this audit; SDK interactions are tested
+with offline fakes. Templates remain the authoritative explanation.
 
 ## Known limitations
 
@@ -418,20 +439,25 @@ explanation stands. The model can be changed with `OPS_RECON_LLM_MODEL`.
   editing that module and the rule functions that reference specific columns.
 - Numbers must use a dot as decimal separator; `2.100,50` is reported as
   invalid rather than guessed at.
-- When an `employee_id` appears twice, the first row is used for the
-  comparison. The duplicate is reported as critical, but changes in the
-  second row are not compared.
+- When an `employee_id` repeats in either cycle, cross-cycle comparisons for
+  that ID are skipped until the source is corrected. All rows still receive
+  single-cycle validation; no candidate is treated as authoritative.
+- Malformed rows are skipped and reported. New/removed findings in an incomplete
+  export need source verification and a rerun after the export is corrected.
+- Empty/header-only files are rejected; a fully empty cycle is not supported.
+- Bonus ratios with zero or missing salary are undefined and skipped; negative
+  bonus amounts have no separate anomaly rule in this MVP.
 - A date that becomes unparseable is reported twice, once as an invalid value
   and once as a change to empty. This is deliberate (the second finding
   survives even if the date column is not required) but adds a line to the
   queue.
 - Runs are not stored, so there is no history and no "was this already
   reviewed last cycle" state.
-- Throughput is plain single-process Python: on a laptop, two cycles of
-  10,000 rows reconcile in about 1.5 seconds and two cycles of 100,000 rows in
-  about half a minute. That is fine for a batch tool, but the review table is
-  not paginated, so very large queues are better handled through the CSV
-  export than the UI.
+- Large-file throughput has not been benchmarked reproducibly here. The review
+  table is not paginated; use CSV exports for large queues.
+- SQL examples illustrate individual checks on cleaned data. They are not a
+  second implementation of all validation, duplicate-resolution or configurable
+  rules behavior.
 
 ## Future improvements
 

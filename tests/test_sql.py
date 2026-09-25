@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 
 import pandas as pd
 import pytest
@@ -96,3 +97,14 @@ def test_anomalies_sql(db):
     assert set(zip(impossible["employee_id"], impossible["problem"])) == {
         ("EMP-00056", "malformed_email"), ("EMP-00188", "end_before_start"),
     }
+
+
+def test_short_bank_values_are_fully_masked():
+    with closing(sqlite3.connect(":memory:")) as connection:
+        load_table(connection, "employees_previous", DATA_DIR / "demo_previous.csv")
+        load_table(connection, "employees_current", DATA_DIR / "demo_current.csv")
+        connection.execute("UPDATE employees_current SET iban = 'SECRET' WHERE employee_id IN ('EMP-00001', 'EMP-00002')")
+        duplicates = run(connection, "duplicates.sql")[2]
+        assert "****" in set(duplicates.iban_masked)
+        changes = run(connection, "monthly_changes.sql")[2]
+        assert "SECRET" not in changes.to_csv(index=False)

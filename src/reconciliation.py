@@ -2,8 +2,8 @@
 
 Records are matched on ``employee_id``. Rows without a key cannot be matched
 and are left to the validators to report. When a key appears more than once
-the first row is used for comparison; the duplicate itself is reported by the
-validators as a critical issue.
+that key is excluded from comparison in both cycles; validators report a critical
+issue requiring human review.
 """
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ from src.utils import (
     mask_iban,
     normalize_iban,
     normalize_text,
+    format_change,
     percentage_change,
+    redact_message,
 )
 from src.validators import ValidatedDataset
 
@@ -33,6 +35,18 @@ def reconcile(previous: ValidatedDataset, current: ValidatedDataset, rules: Rule
     """Compare two validated cycles and return every lifecycle and field-change issue."""
     before = index_by_key(previous.frame)
     after = index_by_key(current.frame)
+    ambiguous = set()
+    for dataset in (previous, current):
+        keys = dataset.frame[KEY_FIELD].map(normalize_text)
+        ambiguous.update(keys[keys.notna() & keys.duplicated(keep=False)])
+    for key in ambiguous:
+        before.pop(key, None)
+        after.pop(key, None)
+
+    unavailable = previous.missing_columns | current.missing_columns
+    for record in list(before.values()) + list(after.values()):
+        for field in unavailable:
+            record[field] = None
 
     issues: list[Issue] = []
     issues += detect_new_records(before, after, rules)
@@ -63,7 +77,7 @@ def detect_new_records(before: Records, after: Records, rules: Rules) -> list[Is
             rule="new_record",
             outcome=outcome,
             rules=rules,
-            message=f"New record{_name_suffix(after[key])}: not present in the previous cycle.",
+            message=f"New record{_name_suffix(after[key], rules)}: not present in the previous cycle.",
         )
         for key in sorted(after.keys() - before.keys())
     ]
@@ -79,15 +93,16 @@ def detect_removed_records(before: Records, after: Records, rules: Rules) -> lis
             outcome=outcome,
             rules=rules,
             message=(
-                f"Record removed{_name_suffix(before[key])}: present in the previous cycle only."
+                f"Record removed{_name_suffix(before[key], rules)}: present in the previous cycle only."
             ),
         )
         for key in sorted(before.keys() - after.keys())
     ]
 
 
-def _name_suffix(row: Row) -> str:
-    parts = (normalize_text(row.get("first_name")), normalize_text(row.get("last_name")))
+def _name_suffix(row: Row, rules: Rules) -> str:
+    parts = tuple(display_value(field, row.get(field), rules.masked_fields)
+                  for field in ("first_name", "last_name"))
     name = " ".join(part for part in parts if part)
     return f" ({name})" if name else ""
 
@@ -151,7 +166,7 @@ def compare_salary(key: str, before: Row, after: Row, rules: Rules) -> list[Issu
             )
         ]
 
-    change = percentage_change(prev, curr)
+    change = percentage_change(prev, curr, rounded=False)
     if change is None:  # previous salary was zero
         return [
             _change_issue(
@@ -165,13 +180,14 @@ def compare_salary(key: str, before: Row, after: Row, rules: Rules) -> list[Issu
         ]
 
     direction = "increased" if change > 0 else "decreased"
+    thresholds = (rules.salary_change.warning_percentage, rules.salary_change.critical_percentage)
     return [
         _change_issue(
             key, field, prev, curr, rules,
             category=Category.SALARY_CHANGE, rule="salary_change",
-            severity=salary_change_severity(change, rules), change_percentage=change,
+            severity=salary_change_severity(change, rules), change_percentage=round(change, 6),
             message=(
-                f"Monthly salary {direction} by {abs(change):.2f}% "
+                f"Monthly salary {direction} by {format_change(change, thresholds)}% "
                 f"(from {format_value(prev)} to {format_value(curr)})."
             ),
         )
@@ -304,5 +320,5 @@ def _change_issue(
         rule=rule,
         severity=severity,
         requires_review=rules.requires_review(severity, requires_review),
-        message=message,
+        message=redact_message(message, [{field: prev}, {field: curr}], rules.masked_fields),
     )

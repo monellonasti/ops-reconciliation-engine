@@ -6,6 +6,7 @@ import math
 import re
 from collections.abc import Iterable
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
@@ -59,10 +60,11 @@ def is_valid_email(value: Any) -> bool:
     return text is not None and _EMAIL_PATTERN.match(text) is not None
 
 
-def percentage_change(previous: Any, current: Any) -> float | None:
+def percentage_change(previous: Any, current: Any, *, rounded: bool = True) -> float | None:
     """Relative change in percent, rounded to two decimals.
 
     Returns None when a percentage is not meaningful (missing or zero baseline).
+    Use rounded=False for threshold classification; round only for display.
     """
     if is_missing(previous) or is_missing(current):
         return None
@@ -70,7 +72,10 @@ def percentage_change(previous: Any, current: Any) -> float | None:
     curr = float(current)
     if prev == 0 or math.isinf(prev) or math.isinf(curr):
         return None
-    return round((curr - prev) / abs(prev) * 100, 2)
+    # Decimal text avoids binary floating-point noise at exact business thresholds.
+    before, after = Decimal(str(prev)), Decimal(str(curr))
+    change = float((after - before) / abs(before) * 100)
+    return round(change, 2) if rounded else change
 
 
 def format_value(value: Any) -> str:
@@ -118,6 +123,44 @@ def display_value(field: str | None, value: Any, masked_fields: Iterable[str]) -
     """
     if is_missing(value):
         return None
-    if field is not None and field in set(masked_fields):
+    if field == "iban" or (field is not None and field in set(masked_fields)):
         return mask_iban(value) if field == "iban" else "****"
-    return to_display_value(value)
+    shown = to_display_value(value)
+    return redact_iban_text(shown) if isinstance(shown, str) else shown
+
+
+# Recognizable compact or space-separated bank identifiers in misplaced input.
+_IBAN_TEXT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{2}\d{2}(?:[ \t]?[A-Za-z0-9]){11,30}(?![A-Za-z0-9])")
+
+
+def redact_iban_text(text: str) -> str:
+    return _IBAN_TEXT.sub(lambda match: mask_iban(match.group()) or "****", text)
+
+
+def redact_message(message: str, rows: Iterable[dict[str, Any]], masked_fields: Iterable[str]) -> str:
+    """Remove configured values from free text as well as structured cells."""
+    replacements = set()
+    for row in rows:
+        for field in masked_fields:
+            value = row.get(field)
+            if not is_missing(value):
+                replacements.add(str(value))
+                replacements.add(format_value(value))
+    for value in sorted(replacements, key=len, reverse=True):
+        if value:
+            message = message.replace(value, "****")
+    return redact_iban_text(message)
+
+
+def format_change(change: float, thresholds: Iterable[float]) -> str:
+    """Percentage magnitude for messages: two decimals, unless that rounding would
+    land exactly on a configured threshold while the true value does not.
+
+    ``42.857142`` -> ``42.86``; ``15.0001`` with a 15% threshold -> ``15.0001``.
+    """
+    magnitude = abs(change)
+    compact = f"{magnitude:.2f}"
+    for threshold in thresholds:
+        if float(compact) == float(threshold) and magnitude != float(threshold):
+            return f"{magnitude:.6f}".rstrip("0").rstrip(".")
+    return compact

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
+import importlib.util
 
 import pytest
 
@@ -31,7 +30,7 @@ def test_demo_headline_scenario_matches_the_brief(demo_result):
 
     assert issue.previous_value == 2100.0
     assert issue.current_value == 3000.0
-    assert issue.change_percentage == 42.86
+    assert issue.change_percentage == pytest.approx(42.857143)
     assert issue.severity is Severity.CRITICAL
 
 
@@ -58,7 +57,11 @@ def test_generator_is_deterministic(tmp_path):
     previous = (DATA_DIR / "demo_previous.csv").read_bytes()
     current = (DATA_DIR / "demo_current.csv").read_bytes()
 
-    subprocess.run([sys.executable, str(script)], check=True, capture_output=True)
+    spec = importlib.util.spec_from_file_location("demo_generator", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.DATA_DIR = tmp_path
+    module.main()
 
-    assert (DATA_DIR / "demo_previous.csv").read_bytes() == previous
-    assert (DATA_DIR / "demo_current.csv").read_bytes() == current
+    assert (tmp_path / "demo_previous.csv").read_bytes() == previous
+    assert (tmp_path / "demo_current.csv").read_bytes() == current

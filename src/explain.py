@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from src.config import Rules
 from src.models import Issue, Severity
-from src.utils import format_value
+from src.utils import format_change, format_value, redact_iban_text
 
 logger = logging.getLogger(__name__)
 
@@ -55,20 +55,21 @@ def explain_issue(issue: Issue, rules: Rules) -> Explanation:
 def _salary_change(issue: Issue, rules: Rules) -> Explanation:
     cfg = rules.salary_change
     change = issue.change_percentage
+    shown = "" if change is None else format_change(change, (cfg.warning_percentage, cfg.critical_percentage))
     if change is None:
         why = (
             "The previous value was zero or missing, so a percentage cannot be computed. "
             "Any change from an empty baseline is surfaced for a human to confirm."
         )
     elif issue.severity is Severity.CRITICAL:
-        why = f"A {abs(change):.2f}% change exceeds the configured {cfg.critical_percentage:g}% critical threshold."
+        why = f"A {shown}% change exceeds the configured {cfg.critical_percentage:g}% critical threshold."
     elif issue.severity is Severity.WARNING:
         why = (
-            f"A {abs(change):.2f}% change exceeds the {cfg.warning_percentage:g}% warning threshold "
-            f"but stays below the {cfg.critical_percentage:g}% critical threshold."
+            f"A {shown}% change exceeds the {cfg.warning_percentage:g}% warning threshold "
+            f"but does not exceed the {cfg.critical_percentage:g}% critical threshold."
         )
     else:
-        why = f"A {abs(change):.2f}% change is within the {cfg.warning_percentage:g}% tolerance; listed for completeness."
+        why = f"A {shown}% change is within the {cfg.warning_percentage:g}% tolerance; listed for completeness."
 
     actions = (
         ["No action required unless the change is unexpected for this employee."]
@@ -251,7 +252,7 @@ def _overtime(issue: Issue, rules: Rules) -> Explanation:
     return Explanation(
         what_changed=issue.message,
         why_flagged=(
-            "Negative overtime is not a possible value and points to a data-entry error."
+            f"Overtime is below the configured minimum of {cfg.minimum_hours:g} hours."
             if negative
             else f"Overtime above {format_value(cfg.warning_hours)} hours is a warning and above "
             f"{format_value(cfg.critical_hours)} hours is critical."
@@ -353,8 +354,11 @@ def explain_with_llm(issue: Issue, rules: Rules, explanation: Explanation | None
         return f"AI explanation unavailable: the API returned status {exc.status_code}."
     except anthropic.APIConnectionError:
         return "AI explanation unavailable: could not reach the API."
+    except Exception:
+        logger.warning("AI explanation failed; error details omitted to protect input values")
+        return "AI explanation unavailable: the request failed; the template explanation applies."
 
     if response.stop_reason == "refusal":
         return "AI explanation unavailable for this finding; the template explanation applies."
     text = "".join(block.text for block in response.content if block.type == "text").strip()
-    return text or "AI explanation unavailable: the model returned no text."
+    return redact_iban_text(text) or "AI explanation unavailable: the model returned no text."

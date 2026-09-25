@@ -45,8 +45,12 @@ ORDER BY employee_id, field;
 -- 3. IBAN changes. Only masked values are returned.
 SELECT
     p.employee_id,
-    SUBSTR(REPLACE(UPPER(p.iban), ' ', ''), 1, 5) || '****' || SUBSTR(REPLACE(UPPER(p.iban), ' ', ''), -4) AS previous_iban_masked,
-    SUBSTR(REPLACE(UPPER(c.iban), ' ', ''), 1, 5) || '****' || SUBSTR(REPLACE(UPPER(c.iban), ' ', ''), -4) AS current_iban_masked
+    CASE WHEN p.iban IS NULL OR p.iban = '' THEN NULL
+         WHEN LENGTH(REPLACE(p.iban, ' ', '')) < 12 THEN '****'
+         ELSE SUBSTR(REPLACE(UPPER(p.iban), ' ', ''), 1, 5) || '****' || SUBSTR(REPLACE(UPPER(p.iban), ' ', ''), -4) END AS previous_iban_masked,
+    CASE WHEN c.iban IS NULL OR c.iban = '' THEN NULL
+         WHEN LENGTH(REPLACE(c.iban, ' ', '')) < 12 THEN '****'
+         ELSE SUBSTR(REPLACE(UPPER(c.iban), ' ', ''), 1, 5) || '****' || SUBSTR(REPLACE(UPPER(c.iban), ' ', ''), -4) END AS current_iban_masked
 FROM employees_previous AS p
 JOIN employees_current  AS c ON c.employee_id = p.employee_id
 WHERE COALESCE(REPLACE(UPPER(p.iban), ' ', ''), '') <> COALESCE(REPLACE(UPPER(c.iban), ' ', ''), '');

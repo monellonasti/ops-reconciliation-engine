@@ -113,3 +113,21 @@ def test_display_value_masks_configured_fields_only():
     assert display_value("email", "ada@example.com", ["email"]) == "****"
     assert display_value("start_date", pd.Timestamp("2024-01-31"), masked) == "2024-01-31"
     assert math.isnan(float("nan"))  # sanity: NaN inputs are treated as missing above
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        (42.857142857, "42.86"),
+        (-10.0, "10.00"),
+        (15.0, "15.00"),  # exactly on the threshold: nothing to disambiguate
+        (15.0001, "15.0001"),  # would read as 15.00 and look like INFO
+        (29.999, "29.999"),
+        (30.00004, "30.00004"),
+        (100.0, "100.00"),
+    ],
+)
+def test_format_change_keeps_precision_only_near_thresholds(change, expected):
+    from src.utils import format_change
+
+    assert format_change(change, (15, 30)) == expected

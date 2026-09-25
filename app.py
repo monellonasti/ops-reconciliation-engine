@@ -26,7 +26,7 @@ from src.models import (
     Severity,
 )
 from src.reporting import full_report_csv, review_queue_csv
-from src.utils import display_value, format_percentage, format_value
+from src.utils import display_value, format_percentage, format_value, is_missing, normalize_iban
 
 logger = logging.getLogger("ops_reconciliation.app")
 
@@ -47,6 +47,10 @@ def main() -> None:
     st.caption("Automate deterministic checks. Surface exceptions. Keep humans in control.")
 
     rules = load_rules_or_stop()
+    if st.session_state.get("result") is not None and st.session_state.get("run_rules") != rules:
+        for key in ("result", "previous", "current", "sources", "run_rules", "ai_explanations"):
+            st.session_state.pop(key, None)
+        st.info("Rules changed. Run reconciliation again to apply them.")
     render_sidebar(rules)
     render_inputs(rules)
 
@@ -59,6 +63,8 @@ def main() -> None:
         return
 
     previous_label, current_label = st.session_state["sources"]
+    if (previous_label, current_label) == (DEMO_PREVIOUS.name, DEMO_CURRENT.name):
+        st.caption("Synthetic demo data. No real people or bank accounts are represented.")
     st.markdown(f"**Comparing** `{previous_label}` (previous) **with** `{current_label}` (current)")
     for note in result.notes:
         st.caption(f"Note: {note}")
@@ -108,8 +114,9 @@ def render_sidebar(rules: Rules) -> None:
         )
 
         if st.button("Reset session", width="stretch"):
-            for key in ("result", "previous", "current", "sources", "error", "ai_explanations"):
+            for key in ("result", "previous", "current", "sources", "error", "ai_explanations", "run_rules", "upload_previous", "upload_current"):
                 st.session_state.pop(key, None)
+            st.query_params.pop("demo", None)
             st.rerun()
 
 
@@ -145,6 +152,8 @@ def run_pipeline(
 ) -> None:
     st.session_state.pop("error", None)
     st.session_state.pop("ai_explanations", None)
+    for key in ("result", "previous", "current", "sources", "run_rules"):
+        st.session_state.pop(key, None)
     try:
         previous = load_dataset(previous_source, name="previous", rules=rules)
     except DatasetLoadError as exc:
@@ -157,8 +166,8 @@ def run_pipeline(
         return
     try:
         result = run_reconciliation(previous, current, rules)
-    except Exception:  # noqa: BLE001 - last line of defence so the UI never shows a traceback
-        logger.exception("Unexpected error during reconciliation")
+    except Exception:
+        logger.error("Unexpected error during reconciliation; input values omitted")
         st.session_state["error"] = (
             "Something went wrong while reconciling the files. Check that both files are valid "
             "CSV exports with the expected columns, then try again."
@@ -170,6 +179,7 @@ def run_pipeline(
         previous=previous,
         current=current,
         sources=(previous_label, current_label),
+        run_rules=rules.model_copy(deep=True),
     )
 
 
@@ -228,6 +238,10 @@ def render_review_table(result: ReconciliationResult) -> Issue | None:
         "Tick the box at the left of a row to see its details."
     )
     if not filtered:
+        if not result.issues:
+            st.success("No findings detected by the configured checks.")
+        else:
+            st.info("No findings match these filters.")
         return None
 
     table = issues_table(filtered)
@@ -255,6 +269,8 @@ def issues_table(issues: list[Issue]) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "Employee ID": [issue.record_label for issue in issues],
+            "Cycle": [issue.dataset for issue in issues],
+            "Source row": ["" if issue.row_number is None else issue.row_number for issue in issues],
             "Category": [issue.category.label for issue in issues],
             "Field": [issue.field or "" for issue in issues],
             "Previous": [format_value(issue.previous_value) for issue in issues],
@@ -332,14 +348,32 @@ def record_snapshot(issue: Issue, rules: Rules) -> pd.DataFrame | None:
     for column in EXPECTED_COLUMNS:
         prev_value = display_value(column, before.get(column) if before else None, rules.masked_fields)
         curr_value = display_value(column, after.get(column) if after else None, rules.masked_fields)
+        raw_prev = before.get(column) if before else None
+        raw_curr = after.get(column) if after else None
+        if column == "iban":
+            raw_prev, raw_curr = normalize_iban(raw_prev), normalize_iban(raw_curr)
+        unavailable = column in previous.missing_columns | current.missing_columns
+        same = (is_missing(raw_prev) and is_missing(raw_curr)) or raw_prev == raw_curr
         rows.append(
             {
                 "Field": column,
                 "Previous": format_value(prev_value),
                 "Current": format_value(curr_value),
-                "Changed": "" if format_value(prev_value) == format_value(curr_value) else "yes",
+                "Changed": "not compared" if unavailable else ("" if same else "yes"),
             }
         )
+    if issue.employee_id:
+        for dataset in (previous, current):
+            candidates = dataset.frame[dataset.frame[KEY_FIELD] == issue.employee_id]
+            if len(candidates) > 1:
+                # No single candidate is authoritative; expose each for human inspection.
+                return pd.DataFrame([
+                    {"Cycle": source.name, "Source row": record[SOURCE_ROW],
+                     **{field: display_value(field, record.get(field), rules.masked_fields)
+                        for field in EXPECTED_COLUMNS}}
+                    for source in (previous, current)
+                    for record in source.frame[source.frame[KEY_FIELD] == issue.employee_id].to_dict("records")
+                ])
     return pd.DataFrame(rows)
 
 

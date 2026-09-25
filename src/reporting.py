@@ -52,7 +52,8 @@ def build_summary(issues: list[Issue], previous_records: int, current_records: i
     for issue in issues:
         by_severity[issue.severity] += 1
     review_records = {
-        issue.record_label for issue in issues if issue.requires_review
+        ("key", issue.employee_id) if issue.employee_id else (issue.dataset, issue.row_number)
+        for issue in issues if issue.requires_review
     }
     return Summary(
         previous_records=previous_records,
@@ -76,7 +77,12 @@ def issues_to_frame(issues: list[Issue]) -> pd.DataFrame:
 def to_csv_bytes(frame: pd.DataFrame) -> bytes:
     """UTF-8 with BOM so the file opens cleanly in spreadsheet tools."""
     buffer = io.StringIO()
-    frame.to_csv(buffer, index=False, lineterminator="\n")
+    safe = frame.map(
+        lambda value: "'" + value
+        if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@"))
+        else value
+    )
+    safe.to_csv(buffer, index=False, lineterminator="\n")
     return buffer.getvalue().encode("utf-8-sig")
 
 

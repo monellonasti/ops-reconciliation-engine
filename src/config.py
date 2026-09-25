@@ -8,6 +8,7 @@ still behaves sensibly if a key is omitted from the file.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -25,7 +26,7 @@ class RulesConfigError(Exception):
 class _StrictModel(BaseModel):
     # Reject unknown keys so a typo in the YAML fails loudly instead of silently
     # falling back to a default.
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class RuleOutcome(_StrictModel):
@@ -47,7 +48,7 @@ class InvalidValueRules(_StrictModel):
 
 
 class DuplicateRules(_StrictModel):
-    employee_id: Severity = Severity.CRITICAL
+    employee_id: Literal[Severity.CRITICAL] = Severity.CRITICAL
     email: Severity = Severity.WARNING
     iban: Severity = Severity.WARNING
 
@@ -87,8 +88,8 @@ class OvertimeRules(_StrictModel):
 
 
 class IbanChangeRules(_StrictModel):
-    requires_review: bool = True
-    severity: Severity = Severity.CRITICAL
+    requires_review: Literal[True] = True
+    severity: Literal[Severity.CRITICAL] = Severity.CRITICAL
 
 
 class ContractChangeRules(_StrictModel):
@@ -138,6 +139,10 @@ class Rules(_StrictModel):
     def _key_always_required(self) -> Rules:
         if KEY_FIELD not in self.required_fields:
             self.required_fields.insert(0, KEY_FIELD)
+        if "iban" not in self.masked_fields:
+            self.masked_fields.append("iban")
+        if KEY_FIELD in self.masked_fields:
+            raise ValueError("employee_id cannot be masked: it identifies review records")
         return self
 
     def requires_review(self, severity: Severity, override: bool | None = None) -> bool:
@@ -165,9 +170,11 @@ def load_rules(path: str | Path | None = None) -> Rules:
     try:
         raw = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
-        raise RulesConfigError(f"Rules file is not valid YAML ({rules_path.name}): {exc}") from exc
+        raise RulesConfigError(f"Rules file is not valid YAML ({rules_path.name}).") from exc
+    except (OSError, UnicodeError) as exc:
+        raise RulesConfigError("Rules file could not be read as UTF-8.") from exc
 
-    return rules_from_dict(raw or {}, source=rules_path.name)
+    return rules_from_dict({} if raw is None else raw, source=rules_path.name)
 
 
 def rules_from_dict(raw: dict, source: str = "rules") -> Rules:

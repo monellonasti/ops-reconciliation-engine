@@ -28,8 +28,9 @@ HAVING COUNT(DISTINCT employee_id) > 1;
 -- 3. The same IBAN on two different employees. Only a masked form is selected,
 --    so the result can be shared without exposing full bank details.
 SELECT
-    SUBSTR(REPLACE(UPPER(iban), ' ', ''), 1, 5) || '****' ||
-    SUBSTR(REPLACE(UPPER(iban), ' ', ''), -4)         AS iban_masked,
+    CASE WHEN LENGTH(REPLACE(iban, ' ', '')) < 12 THEN '****'
+         ELSE SUBSTR(REPLACE(UPPER(iban), ' ', ''), 1, 5) || '****' ||
+              SUBSTR(REPLACE(UPPER(iban), ' ', ''), -4) END AS iban_masked,
     COUNT(DISTINCT employee_id)                        AS employees,
     GROUP_CONCAT(DISTINCT employee_id)                 AS employee_ids
 FROM employees_current

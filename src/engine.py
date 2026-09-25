@@ -52,7 +52,12 @@ def run_reconciliation(
         summary.warnings,
         summary.records_requiring_review,
     )
-    return ReconciliationResult(issues=issues, summary=summary, notes=previous.notes + current.notes)
+    notes = previous.notes + current.notes
+    if previous.issues or current.issues:
+        notes.append("Some rows were skipped. Lifecycle findings may reflect incomplete exports; verify the source files.")
+    if any(issue.rule == "duplicate_employee_id" for issue in issues):
+        notes.append("Duplicate employee IDs were excluded from cross-cycle comparison in both cycles; review all candidate rows at source.")
+    return ReconciliationResult(issues=issues, summary=summary, notes=notes)
 
 
 def reconcile_sources(
@@ -89,9 +94,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    (args.output_dir / "reconciliation_report.csv").write_bytes(full_report_csv(result))
-    (args.output_dir / "review_required.csv").write_bytes(review_queue_csv(result))
+    try:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        (args.output_dir / "reconciliation_report.csv").write_bytes(full_report_csv(result))
+        (args.output_dir / "review_required.csv").write_bytes(review_queue_csv(result))
+    except OSError:
+        print("Error: Could not write both reports. Check the output directory and permissions; a partial report may exist.", file=sys.stderr)
+        return 1
 
     summary = result.summary
     print(f"Records processed: {summary.current_records} (previous cycle: {summary.previous_records})")

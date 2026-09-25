@@ -86,7 +86,11 @@ def check_overtime(row: dict[str, Any], factory: IssueFactory, rules: Rules) -> 
     if severity is None:
         return []
     if hours < rules.overtime.minimum_hours:
-        message = f"Overtime hours are negative ({format_value(hours)})."
+        message = (
+            f"Overtime hours are negative ({format_value(hours)})."
+            if rules.overtime.minimum_hours == 0
+            else f"Overtime of {format_value(hours)} hours is below the {format_value(rules.overtime.minimum_hours)}-hour minimum."
+        )
     else:
         limit = (
             rules.overtime.critical_hours

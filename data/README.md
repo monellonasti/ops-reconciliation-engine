@@ -2,7 +2,7 @@
 
 **Everything in this folder is invented.** Names are drawn from short lists,
 emails use the reserved `example.com` domain and IBANs are random digits
-without valid check digits. No real person or organisation is represented.
+whose check digits are not validated. No real person or organisation is represented.
 
 The files are produced by `scripts/generate_demo_data.py` with a fixed seed,
 so regenerating them gives identical output.

@@ -10,7 +10,9 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from src.utils import redact_iban_text
 
 # Column layout of the demo use case. The key field is what records are matched on.
 KEY_FIELD = "employee_id"
@@ -93,6 +95,11 @@ class Issue(BaseModel):
     severity: Severity
     requires_review: bool
     message: str
+
+    @field_validator("employee_id", "field", "previous_value", "current_value", "message")
+    @classmethod
+    def _sanitize_text(cls, value):
+        return redact_iban_text(value) if isinstance(value, str) else value
 
     @property
     def record_label(self) -> str:

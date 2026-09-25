@@ -1,7 +1,7 @@
 """Generate the synthetic demo datasets in ``data/``.
 
 Everything here is invented: names are drawn from short lists, emails use the
-reserved ``example.com`` domain and IBANs are random digits with no valid
+reserved ``example.com`` domain and IBANs are random digits with an unvalidated
 checksum. Running the script twice produces identical files (fixed seed).
 
     python scripts/generate_demo_data.py
@@ -120,7 +120,7 @@ def base_record(index: int, rng: random.Random) -> Record:
 
 
 def synthetic_iban(rng: random.Random, index: int) -> str:
-    # Looks like an Italian IBAN (27 characters) but carries no valid check digits.
+    # Looks like an Italian IBAN (27 characters) with unvalidated check digits.
     digits = "".join(str(rng.randint(0, 9)) for _ in range(17))
     return f"IT{rng.randint(10, 99)}{rng.choice('ABCDEFGHJKLMNPQRSTUVWXYZ')}{digits}{index:05d}"
 

@@ -1,7 +1,7 @@
 # Business rules for the Ops Reconciliation Engine.
 #
-# Everything an operations lead might want to tune lives here. The Python code
-# reads these values through src/config.py and never hardcodes a threshold.
+# Configurable business thresholds and outcomes. The Python code reads these
+# values through src/config.py; salary/bonus/overtime severity bands are fixed.
 # Severities are one of: info, warning, critical.
 
 # Fields that must be present and non-empty on every record.
@@ -28,7 +28,7 @@ invalid_values:
   malformed_email_severity: warning
 
 duplicates:
-  employee_id: critical
+  employee_id: critical         # mandatory; duplicate IDs always require review
   email: warning
   iban: warning
 
@@ -46,8 +46,8 @@ overtime:
   critical_hours: 100
 
 iban_change:
-  requires_review: true
-  severity: critical
+  requires_review: true         # mandatory safety invariant
+  severity: critical            # cannot be downgraded
 
 contract_changes:
   contract_type:
@@ -70,6 +70,7 @@ lifecycle:
     severity: warning
 
 # Columns whose values must never be displayed or exported in full.
+# IBAN is always included; employee_id must remain visible for record identification.
 masked_fields:
   - iban
 

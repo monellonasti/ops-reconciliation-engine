@@ -63,7 +63,7 @@ def test_records_without_a_key_are_not_matched(make_loaded, rules):
     assert [issue.rule for issue in issues] == []
 
 
-def test_duplicate_key_uses_the_first_row_for_comparison(make_loaded, rules):
+def test_duplicate_key_is_excluded_from_comparison(make_loaded, rules):
     current = [employee(monthly_salary="2100"), employee(monthly_salary="9000")]
 
     issues = reconcile_rows(make_loaded, rules, [employee()], current)
@@ -101,7 +101,7 @@ def test_salary_increase_is_reported_with_percentage(make_loaded, rules):
     assert issue.category is Category.SALARY_CHANGE
     assert issue.previous_value == 2100.0
     assert issue.current_value == 3000.0
-    assert issue.change_percentage == 42.86
+    assert issue.change_percentage == pytest.approx(42.857143)
     assert issue.severity is Severity.CRITICAL
     assert issue.requires_review is True
     assert "increased by 42.86%" in issue.message
@@ -270,3 +270,16 @@ def test_date_that_becomes_unparseable_is_reported_as_emptied(make_loaded, rules
     assert issue.previous_value == "2020-01-15"
     assert issue.current_value is None
     assert "to empty" in issue.message
+
+
+def test_salary_message_shows_extra_precision_only_when_it_matters(make_loaded, rules):
+    boundary = reconcile_rows(
+        make_loaded, rules, [employee(monthly_salary="2000")], [employee(monthly_salary="2300.002")]
+    )
+    ordinary = reconcile_rows(
+        make_loaded, rules, [employee(monthly_salary="2100")], [employee(monthly_salary="3000")]
+    )
+
+    assert only(boundary, "salary_change").severity is Severity.WARNING
+    assert "increased by 15.0001%" in only(boundary, "salary_change").message
+    assert "increased by 42.86%" in only(ordinary, "salary_change").message
