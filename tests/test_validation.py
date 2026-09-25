@@ -85,6 +85,14 @@ def test_duplicate_email_is_case_insensitive_and_reported_per_record(make_loaded
     assert "EMP-00002" in issues[0].message
 
 
+def test_same_record_exported_twice_is_only_a_duplicate_key_issue(make_loaded, rules):
+    loaded = make_loaded([employee(), employee(monthly_salary="2350")])
+
+    issues = validate_dataset(loaded, rules).issues
+
+    assert [issue.rule for issue in issues] == ["duplicate_employee_id"]
+
+
 def test_duplicate_iban_never_exposes_the_full_iban(make_loaded, rules):
     iban = "IT60X0542811101000000123456"
     loaded = make_loaded(

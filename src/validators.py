@@ -252,8 +252,10 @@ def _duplicate_values(
     factory = IssueFactory(dataset, rules)  # type: ignore[arg-type]
     issues: list[Issue] = []
     for _, rows in _group_rows(frame, column, normalize).items():
+        if len({_label(row) for row in rows}) < 2:
+            continue  # the same record exported twice: already a duplicate-key issue
         for row in rows:
-            others = [_label(other) for other in rows if other is not row]
+            others = sorted({_label(other) for other in rows if _label(other) != _label(row)})
             issues.append(
                 factory.issue(
                     row,
