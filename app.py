@@ -311,8 +311,8 @@ def issues_table(issues: list[Issue]) -> pd.DataFrame:
         {
             "Employee ID": [issue.record_label for issue in issues],
             "Cycle": [issue.dataset for issue in issues],
-            # Nullable integers render as blanks and keep the column numeric for Arrow.
-            "Source row": pd.array([issue.row_number for issue in issues], dtype="Int64"),
+            # Text on purpose: a mixed int/blank column breaks Arrow and nullable ints show "None".
+            "Source row": ["" if issue.row_number is None else str(issue.row_number) for issue in issues],
             "Category": [issue.category.label for issue in issues],
             "Field": [issue.field or "" for issue in issues],
             "Previous": [format_value(issue.previous_value) for issue in issues],

@@ -67,8 +67,8 @@ def test_demo_dataset_fills_summary_table_and_exports():
         "Severity", "Review Required", "Status", "Explanation",
     ]
     assert len(review_table) == 46
-    assert set(review_table["Status"]) == {"Open"}  # fresh checkout: no decisions stored yet
-    assert str(review_table["Source row"].dtype) == "Int64"
+    assert set(review_table["Status"]) == {"Open"}  # isolated history: no decisions stored
+    assert "" in set(review_table["Source row"]) and "175" in set(review_table["Source row"])
     assert set(review_table["Severity"]) == {"🔴 Critical", "🟠 Warning", "🔵 Info"}
     assert "Download Full Report" in [button.label for button in at.get("download_button")]
     assert "Download Review Queue" in [button.label for button in at.get("download_button")]
@@ -221,11 +221,10 @@ def test_issues_table_formats_values_for_operators():
 
     table = app_module.issues_table([issue])
 
-    row = table.iloc[0].to_dict()
-    assert pd.isna(row.pop("Source row"))  # cross-cycle finding: no single source line
-    assert row == {
+    assert table.iloc[0].to_dict() == {
         "Employee ID": "EMP-00125",
         "Cycle": "both",
+        "Source row": "",  # cross-cycle finding: no single source line
         "Category": "Salary change",
         "Field": "monthly_salary",
         "Previous": "2,100",
