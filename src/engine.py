@@ -15,8 +15,9 @@ from typing import IO, Any
 
 from src.anomaly_detection import detect_anomalies
 from src.config import Rules, RulesConfigError, load_rules
+from src.history import ReviewHistory, open_history
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
-from src.models import ReconciliationResult
+from src.models import ReconciliationResult, ReviewStatus
 from src.reconciliation import reconcile
 from src.reporting import build_summary, full_report_csv, review_queue_csv, sort_issues
 from src.validators import validate_dataset
@@ -25,9 +26,15 @@ logger = logging.getLogger(__name__)
 
 
 def run_reconciliation(
-    previous: LoadedDataset, current: LoadedDataset, rules: Rules
+    previous: LoadedDataset,
+    current: LoadedDataset,
+    rules: Rules,
+    history: ReviewHistory | None = None,
 ) -> ReconciliationResult:
-    """Full pipeline on two already-loaded datasets."""
+    """Full pipeline on two already-loaded datasets.
+
+    With a ``history``, findings an operator already decided on carry that decision.
+    """
     previous_validated = validate_dataset(previous, rules)
     current_validated = validate_dataset(current, rules)
 
@@ -40,6 +47,8 @@ def run_reconciliation(
         *detect_anomalies(current_validated, rules),
     ]
     issues = sort_issues(issues)
+    if history is not None:
+        issues = history.apply(issues)
     summary = build_summary(
         issues,
         previous_records=previous.record_count,
@@ -64,12 +73,24 @@ def reconcile_sources(
     previous_source: bytes | str | Path | IO[bytes] | Any,
     current_source: bytes | str | Path | IO[bytes] | Any,
     rules: Rules | None = None,
+    history: ReviewHistory | None = None,
 ) -> ReconciliationResult:
     """Convenience wrapper: load both sources and run the pipeline."""
     rules = rules or load_rules()
     previous = load_dataset(previous_source, name="previous", rules=rules)
     current = load_dataset(current_source, name="current", rules=rules)
-    return run_reconciliation(previous, current, rules)
+    return run_reconciliation(previous, current, rules, history)
+
+
+def apply_history(result: ReconciliationResult, history: ReviewHistory) -> ReconciliationResult:
+    """Re-attach stored decisions to an existing result (after an operator saved one)."""
+    issues = history.apply(result.issues)
+    summary = build_summary(
+        issues,
+        previous_records=result.summary.previous_records,
+        current_records=result.summary.current_records,
+    )
+    return ReconciliationResult(issues=issues, summary=summary, notes=result.notes)
 
 
 # --- command line ------------------------------------------------------------------
@@ -89,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         rules = load_rules(args.rules)
-        result = reconcile_sources(args.previous, args.current, rules)
+        result = reconcile_sources(args.previous, args.current, rules, history=open_history(rules))
     except (DatasetLoadError, RulesConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -107,6 +128,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"New: {summary.new_records}  Removed: {summary.removed_records}  Changes: {summary.changes_detected}")
     print(f"Critical: {summary.critical_issues}  Warnings: {summary.warnings}  Info: {summary.info}")
     print(f"Records requiring review: {summary.records_requiring_review}")
+    decided = sum(issue.review_status is not ReviewStatus.OPEN for issue in result.issues)
+    if decided:
+        print(
+            f"Findings with a stored decision: {decided} "
+            f"({summary.accepted_findings} accepted, {summary.needs_action_findings} need action)"
+        )
     print(f"Reports written to {args.output_dir.resolve()}")
     return 0
 

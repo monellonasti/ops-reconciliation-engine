@@ -81,7 +81,12 @@ Previous dataset       Current dataset
 - Presents a review queue with filters (severity, category, review required,
   employee ID) and a detail panel that states what changed, why it was
   flagged, which rule fired and what an operator could check.
-- Exports the full report and the review queue as CSV.
+- Remembers the decision an operator records on a finding (accepted, needs
+  action, with a note and reviewer). When the same finding comes back in a
+  later cycle it carries that decision: accepted exceptions leave the open
+  queue, known problems are shown as such. Stored locally in SQLite.
+- Exports the full report and the review queue as CSV, including the review
+  status of every finding.
 - Masks the IBAN field in findings, tables, snapshots and exports; also redacts
   recognizable IBAN text misplaced in other fields. Configured sensitive fields
   are hidden in both value columns and finding messages.
@@ -128,6 +133,7 @@ ops-reconciliation-engine/
 │   ├── anomaly_detection.py    Single-cycle bonus and overtime rules
 │   ├── engine.py               Orchestrates one run; also a small CLI
 │   ├── reporting.py            Summary counts, sorting, CSV exports
+│   ├── history.py              Review decisions kept between runs (SQLite)
 │   ├── explain.py              Template explanations, optional LLM rewrite
 │   └── utils.py                Masking, percentage change, formatting
 ├── sql/                        The same checks written as readable SQL
@@ -156,8 +162,8 @@ DataFrame or two and returns a list of `Issue` objects:
 4. **Detect anomalies** (`anomaly_detection.py`). Looks at the current cycle
    alone for values that are implausible regardless of history.
 
-`engine.py` runs the four stages, sorts the issues (critical first) and builds
-the summary. `app.py` only does layout and session state; it contains no
+`engine.py` runs the four stages, sorts the issues (critical first), attaches
+any stored review decision and builds the summary. `app.py` only does layout and session state; it contains no
 business logic, which is why the engine can also run from the command line or
 from a scheduler.
 
@@ -234,6 +240,10 @@ review_policy:                  # which severities land in the review queue
   info: false
   warning: true
   critical: true
+
+history:                        # where operator decisions are kept between runs
+  enabled: true
+  path: history/review_history.sqlite
 ```
 
 Lifecycle events (new, removed, dates) and contract field changes each have
@@ -248,6 +258,28 @@ judged by magnitude. Exports keep six decimal places of percentage precision.
 Messages show two decimals, except when that rounding would land exactly on a
 configured threshold while the true value does not: a 15.0001% change is
 written as 15.0001%, never as 15.00%.
+
+### Review history
+
+A finding is identified by what the operator saw: record, rule, field,
+previous and current value as displayed. `history.py` keeps one row per
+finding in a SQLite file (`history/review_history.sqlite` by default, set
+under `history:` in the rules file) plus an append-only log of every
+decision and reversal. On each run the engine looks the current findings up
+and attaches the stored status:
+
+- **Accepted**: verified by a person. The finding stays in the full report
+  with its status, leaves the review queue and the review count, and is
+  hidden by the default status filter.
+- **Needs action**: a known problem waiting for a correction at source. It
+  stays in the queue, labelled, so nobody re-investigates it from scratch.
+- **Open**: no decision yet. Saving "Open" removes a previous decision.
+
+If any of the values change, the fingerprint changes and the finding comes
+back as open: a salary accepted at 2,100 to 3,000 is not accepted at 3,000 to
+3,200. Nothing is written until an operator saves a decision; the engine never
+records or alters one on its own. The same history is applied by the CLI, so a
+scheduled run exports the review status too.
 
 ## Human-in-the-loop approach
 
@@ -269,7 +301,10 @@ auto-resolved:
   say which one is right.
 
 The detail panel suggests *checks*, not conclusions ("verify the effective
-date", "confirm the account holder matches the employee"). The optional AI
+date", "confirm the account holder matches the employee"). The decision the
+operator then records is stored as data, with who took it and when, and it
+only ever suppresses the identical finding; it never teaches the engine to
+skip a rule. The optional AI
 explanation follows the same rule: it may rephrase a finding, it may not say
 whether the change is legitimate, and the deterministic template is always
 there when it is off.
@@ -318,10 +353,10 @@ Other choices worth naming:
 - **No payroll calculation engine.** The tool compares values it is given. It
   has no opinion on what a salary, bonus or contribution *should* be, and
   encodes no knowledge of any country's payroll rules.
-- **No persistence by default.** Files are processed in memory for the
-  session. Storing uploads or results would need retention rules, access
-  control and a deletion story; none of that is needed to make a comparison
-  useful, so it is left out until there is a concrete requirement.
+- **No persistence of uploads or results.** Files are processed in memory
+  for the session. The one thing kept between runs is the review decision an
+  operator saves, because without it the same exceptions come back every
+  cycle. It is a single local SQLite file, easy to inspect or delete.
 - **No authentication.** An internal tool run on a laptop or behind an
   existing gateway does not need its own user database. Adding one would be
   the wrong layer to solve access control at.
@@ -395,9 +430,14 @@ The demo data is synthetic, but the tool is designed as if it were not:
   are stored in a finding. Recognizable IBAN text misplaced in other fields
   is also redacted. Additional fields to hide are configured in the rules file;
   IBAN masking cannot be disabled. The record key must remain visible for review.
-- **No persistent storage.** Uploads and results live in the Streamlit
-  session in memory and disappear when the session ends. Nothing is written
-  to disk by the app. The CLI writes only the two report files you ask for.
+- **No persistent storage of data.** Uploads and results live in the
+  Streamlit session in memory and disappear when the session ends. The CLI
+  writes only the two report files you ask for.
+- **Review decisions are the one thing stored.** Saving a decision writes
+  the record key, rule, field, the masked values as shown, the status, your
+  note, the reviewer name and a timestamp to the SQLite file configured under
+  `history`. Notes are free text: do not paste confidential data into them.
+  Delete the file to forget every decision, or set `history.enabled: false`.
 - **No external calls by default.** The engine runs entirely locally. The
   only network call the code can make is the optional AI explanation, which
   requires an API key to be set explicitly and is triggered per finding by a
@@ -451,8 +491,10 @@ with offline fakes. Templates remain the authoritative explanation.
   and once as a change to empty. This is deliberate (the second finding
   survives even if the date column is not required) but adds a line to the
   queue.
-- Runs are not stored, so there is no history and no "was this already
-  reviewed last cycle" state.
+- Runs themselves are not stored, only decisions. A decision is matched on the
+  values as displayed (masked for IBANs), so two different changes with the
+  same masked rendering would share it; findings on rows without an ID are
+  matched by row number, which shifts if the export changes shape.
 - Large-file throughput has not been benchmarked reproducibly here. The review
   table is not paginated; use CSV exports for large queues.
 - SQL examples illustrate individual checks on cleaned data. They are not a
@@ -472,8 +514,11 @@ None of these exist today.
 - Scheduled reconciliations with a notification when the review queue is not
   empty.
 - Role-based access control if the tool moves behind a shared deployment.
-- Reconciliation history: keep past runs so an operator can mark a finding as
-  reviewed and see it suppressed or flagged again next cycle.
+- Run history: keep past summaries so a cycle can be compared with the ones
+  before it, not only with the previous export.
 - Anomaly trend analysis across cycles (a salary that drifts 10% every month
-  is more interesting than any single 10% change).
+  is more interesting than any single 10% change), building on the run
+  history above.
+- Expected changes as input: a list of approved changes that downgrades the
+  matching findings before anyone has to look at them.
 - Pagination and column sorting in the review table for very large exports.

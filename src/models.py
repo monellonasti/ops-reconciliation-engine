@@ -71,6 +71,18 @@ class Category(StrEnum):
         }[self.value]
 
 
+class ReviewStatus(StrEnum):
+    """What an operator decided about a finding. OPEN means no decision yet."""
+
+    OPEN = "open"
+    ACCEPTED = "accepted"
+    NEEDS_ACTION = "needs_action"
+
+    @property
+    def label(self) -> str:
+        return {"open": "Open", "accepted": "Accepted", "needs_action": "Needs action"}[self.value]
+
+
 class Issue(BaseModel):
     """One finding about one record.
 
@@ -95,8 +107,15 @@ class Issue(BaseModel):
     severity: Severity
     requires_review: bool
     message: str
+    # Review state attached from the history; the engine never sets it on its own.
+    review_status: ReviewStatus = ReviewStatus.OPEN
+    review_note: str | None = None
+    reviewed_by: str | None = None
+    reviewed_at: str | None = None
 
-    @field_validator("employee_id", "field", "previous_value", "current_value", "message")
+    @field_validator(
+        "employee_id", "field", "previous_value", "current_value", "message", "review_note"
+    )
     @classmethod
     def _sanitize_text(cls, value):
         return redact_iban_text(value) if isinstance(value, str) else value
@@ -120,6 +139,8 @@ class Summary(BaseModel):
     info: int
     changes_detected: int
     records_requiring_review: int
+    accepted_findings: int = 0
+    needs_action_findings: int = 0
 
     @property
     def total_issues(self) -> int:
@@ -136,4 +157,9 @@ class ReconciliationResult(BaseModel):
 
     @property
     def review_queue(self) -> list[Issue]:
-        return [issue for issue in self.issues if issue.requires_review]
+        """Findings that still need a human: flagged by a rule and not accepted."""
+        return [
+            issue
+            for issue in self.issues
+            if issue.requires_review and issue.review_status is not ReviewStatus.ACCEPTED
+        ]

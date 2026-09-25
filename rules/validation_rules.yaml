@@ -76,3 +76,10 @@ masked_fields:
 
 # Expected date format in the CSV files (Python strptime syntax).
 date_format: "%Y-%m-%d"
+
+# Review history: decisions operators record on findings (accepted, needs action)
+# are kept in this SQLite file and re-attached when the same finding comes back.
+# Nothing is written until a decision is saved. Set enabled: false to turn it off.
+history:
+  enabled: true
+  path: history/review_history.sqlite

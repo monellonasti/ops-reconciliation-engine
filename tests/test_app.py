@@ -13,11 +13,21 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 import app as app_module
+from src import history as history_module
 from src.config import REPO_ROOT
-from src.models import Category, Issue, Severity
+from src.history import ReviewHistory
+from src.models import Category, Issue, ReviewStatus, Severity
 
 APP_PATH = str(REPO_ROOT / "app.py")
 FULL_IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{20,}\b")
+
+
+@pytest.fixture(autouse=True)
+def isolated_history(tmp_path, monkeypatch) -> ReviewHistory:
+    """Keep UI tests away from the operator's real decision file."""
+    history = ReviewHistory(tmp_path / "history.sqlite")
+    monkeypatch.setattr(history_module, "open_history", lambda rules: history)
+    return history
 
 
 def run_app() -> AppTest:
@@ -54,9 +64,11 @@ def test_demo_dataset_fills_summary_table_and_exports():
     )
     assert list(review_table.columns) == [
         "Employee ID", "Cycle", "Source row", "Category", "Field", "Previous", "Current", "Change",
-        "Severity", "Review Required", "Explanation",
+        "Severity", "Review Required", "Status", "Explanation",
     ]
     assert len(review_table) == 46
+    assert set(review_table["Status"]) == {"Open"}  # fresh checkout: no decisions stored yet
+    assert str(review_table["Source row"].dtype) == "Int64"
     assert set(review_table["Severity"]) == {"🔴 Critical", "🟠 Warning", "🔵 Info"}
     assert "Download Full Report" in [button.label for button in at.get("download_button")]
     assert "Download Review Queue" in [button.label for button in at.get("download_button")]
@@ -209,10 +221,11 @@ def test_issues_table_formats_values_for_operators():
 
     table = app_module.issues_table([issue])
 
-    assert table.iloc[0].to_dict() == {
+    row = table.iloc[0].to_dict()
+    assert pd.isna(row.pop("Source row"))  # cross-cycle finding: no single source line
+    assert row == {
         "Employee ID": "EMP-00125",
         "Cycle": "both",
-        "Source row": "",
         "Category": "Salary change",
         "Field": "monthly_salary",
         "Previous": "2,100",
@@ -220,5 +233,51 @@ def test_issues_table_formats_values_for_operators():
         "Change": "+42.86%",
         "Severity": "🔴 Critical",
         "Review Required": "Yes",
+        "Status": "Open",
         "Explanation": "Monthly salary increased by 42.86%.",
     }
+
+
+# --- review decisions -----------------------------------------------------------------
+
+
+def test_save_decision_persists_and_refreshes_the_result(fake_session_state, isolated_history, rules):
+    app_module.run_pipeline(app_module.DEMO_PREVIOUS, app_module.DEMO_CURRENT, "p", "c", rules, isolated_history)
+    result = fake_session_state["result"]
+    issue = next(i for i in result.issues if i.employee_id == "EMP-00125" and i.rule == "salary_change")
+    before = result.summary.records_requiring_review
+
+    app_module.save_decision(issue, isolated_history, ReviewStatus.ACCEPTED, "Promotion approved", "Ada")
+
+    refreshed = fake_session_state["result"]
+    updated = next(i for i in refreshed.issues if i.employee_id == "EMP-00125" and i.rule == "salary_change")
+    assert updated.review_status is ReviewStatus.ACCEPTED
+    assert updated.review_note == "Promotion approved"
+    assert updated.reviewed_by == "Ada"
+    assert refreshed.summary.accepted_findings == 1
+    assert refreshed.summary.records_requiring_review == before - 1
+    assert isolated_history.count() == 1
+
+    app_module.save_decision(updated, isolated_history, ReviewStatus.OPEN, "", "")
+
+    reopened = next(i for i in fake_session_state["result"].issues if i.employee_id == "EMP-00125" and i.rule == "salary_change")
+    assert reopened.review_status is ReviewStatus.OPEN
+    assert isolated_history.count() == 0
+
+
+def test_demo_run_shows_decisions_from_an_earlier_run(isolated_history, rules):
+    first = app_module.run_reconciliation(
+        app_module.load_dataset(app_module.DEMO_PREVIOUS, name="previous", rules=rules),
+        app_module.load_dataset(app_module.DEMO_CURRENT, name="current", rules=rules),
+        rules,
+    )
+    accepted = next(i for i in first.issues if i.rule == "iban_change")
+    isolated_history.record(accepted, ReviewStatus.ACCEPTED, note="Confirmed with the employee")
+
+    at = click_button(run_app(), "Load demo dataset")
+
+    assert not at.exception
+    assert any("1 accepted" in caption.value for caption in at.caption)
+    table = next(e.value for e in at.dataframe if "Employee ID" in e.value.columns)
+    assert len(table) == 45  # the accepted finding is hidden by the default status filter
+    assert "Accepted" not in set(table["Status"])

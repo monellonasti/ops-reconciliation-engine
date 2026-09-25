@@ -1,11 +1,13 @@
 """Streamlit front end for the Ops Reconciliation Engine.
 
 Run with ``streamlit run app.py``. All processing happens in memory; nothing
-uploaded is written to disk.
+uploaded is written to disk. The only thing persisted is the review decision an
+operator explicitly saves, in the SQLite file configured under ``history``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -13,8 +15,9 @@ import pandas as pd
 import streamlit as st
 
 from src.config import DEFAULT_RULES_PATH, REPO_ROOT, Rules, RulesConfigError, load_rules
-from src.engine import run_reconciliation
+from src.engine import apply_history, run_reconciliation
 from src.explain import Explanation, explain_issue, explain_with_llm, llm_available
+from src.history import ReviewHistory, fingerprint, open_history
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
 from src.models import (
     EXPECTED_COLUMNS,
@@ -23,6 +26,7 @@ from src.models import (
     Category,
     Issue,
     ReconciliationResult,
+    ReviewStatus,
     Severity,
 )
 from src.reporting import full_report_csv, review_queue_csv
@@ -47,12 +51,13 @@ def main() -> None:
     st.caption("Automate deterministic checks. Surface exceptions. Keep humans in control.")
 
     rules = load_rules_or_stop()
+    history = open_history(rules)
     if st.session_state.get("result") is not None and st.session_state.get("run_rules") != rules:
         for key in ("result", "previous", "current", "sources", "run_rules", "ai_explanations"):
             st.session_state.pop(key, None)
         st.info("Rules changed. Run reconciliation again to apply them.")
-    render_sidebar(rules)
-    render_inputs(rules)
+    render_sidebar(rules, history)
+    render_inputs(rules, history)
 
     if st.session_state.get("error"):
         st.error(st.session_state["error"])
@@ -71,7 +76,7 @@ def main() -> None:
 
     render_summary(result)
     selected = render_review_table(result)
-    render_detail_panel(selected, rules)
+    render_detail_panel(selected, rules, history)
     render_exports(result)
 
 
@@ -86,7 +91,7 @@ def load_rules_or_stop() -> Rules:
         st.stop()
 
 
-def render_sidebar(rules: Rules) -> None:
+def render_sidebar(rules: Rules, history: ReviewHistory | None) -> None:
     with st.sidebar:
         st.subheader("Rules in effect")
         st.caption(f"Loaded from `{DEFAULT_RULES_PATH.relative_to(REPO_ROOT).as_posix()}`")
@@ -107,10 +112,21 @@ def render_sidebar(rules: Rules) -> None:
         st.caption("Required fields: " + ", ".join(rules.required_fields))
         st.caption("Masked in the UI and exports: " + ", ".join(rules.masked_fields))
 
+        st.subheader("Review history")
+        if history is None:
+            st.caption("Disabled in the rules file. Decisions are not stored between runs.")
+        else:
+            st.caption(
+                f"Decisions are saved to `{history_display_path(history)}` "
+                f"({history.count()} stored). A finding keeps its decision when it comes back "
+                "in a later cycle with the same values."
+            )
+
         st.subheader("Privacy")
         st.caption(
             "Files are processed in memory for this session only. Nothing is stored on disk "
-            "and no external service is called unless you explicitly request an AI explanation."
+            "except the review decisions you save, and no external service is called unless "
+            "you explicitly request an AI explanation."
         )
 
         if st.button("Reset session", width="stretch"):
@@ -123,7 +139,7 @@ def render_sidebar(rules: Rules) -> None:
 # --- inputs ------------------------------------------------------------------------------
 
 
-def render_inputs(rules: Rules) -> None:
+def render_inputs(rules: Rules, history: ReviewHistory | None) -> None:
     st.subheader("1. Choose the two cycles")
     left, right = st.columns(2)
     previous_file = left.file_uploader("Previous cycle (CSV)", type=["csv"], key="upload_previous")
@@ -142,13 +158,20 @@ def render_inputs(rules: Rules) -> None:
     auto_demo = "demo" in st.query_params and "result" not in st.session_state
 
     if run_clicked and previous_file is not None and current_file is not None:
-        run_pipeline(previous_file, current_file, previous_file.name, current_file.name, rules)
+        run_pipeline(
+            previous_file, current_file, previous_file.name, current_file.name, rules, history
+        )
     elif demo_clicked or auto_demo:
-        run_pipeline(DEMO_PREVIOUS, DEMO_CURRENT, DEMO_PREVIOUS.name, DEMO_CURRENT.name, rules)
+        run_pipeline(DEMO_PREVIOUS, DEMO_CURRENT, DEMO_PREVIOUS.name, DEMO_CURRENT.name, rules, history)
 
 
 def run_pipeline(
-    previous_source: Any, current_source: Any, previous_label: str, current_label: str, rules: Rules
+    previous_source: Any,
+    current_source: Any,
+    previous_label: str,
+    current_label: str,
+    rules: Rules,
+    history: ReviewHistory | None = None,
 ) -> None:
     st.session_state.pop("error", None)
     st.session_state.pop("ai_explanations", None)
@@ -165,7 +188,7 @@ def run_pipeline(
         st.session_state["error"] = f"Current cycle ({current_label}): {exc}"
         return
     try:
-        result = run_reconciliation(previous, current, rules)
+        result = run_reconciliation(previous, current, rules, history)
     except Exception:
         logger.error("Unexpected error during reconciliation; input values omitted")
         st.session_state["error"] = (
@@ -200,11 +223,18 @@ def render_summary(result: ReconciliationResult) -> None:
     ]
     for column, (label, value, help_text) in zip(st.columns(len(cards)), cards, strict=True):
         column.metric(label, value, help=help_text)
+    decided = summary.accepted_findings + summary.needs_action_findings
+    if decided:
+        st.caption(
+            f"{decided} findings already carry a decision from an earlier run: "
+            f"{summary.accepted_findings} accepted (excluded from the review count) and "
+            f"{summary.needs_action_findings} marked as needing action."
+        )
 
 
 def render_review_table(result: ReconciliationResult) -> Issue | None:
     st.subheader("3. Review queue")
-    filter_cols = st.columns([2, 3, 2, 2])
+    filter_cols = st.columns([2, 3, 2, 2, 2])
     severities = filter_cols[0].multiselect(
         "Severity",
         options=list(Severity),
@@ -218,7 +248,14 @@ def render_review_table(result: ReconciliationResult) -> Issue | None:
         format_func=lambda c: c.label,
     )
     review_choice = filter_cols[2].selectbox("Review required", REVIEW_FILTER, index=0)
-    search = filter_cols[3].text_input("Employee ID contains", value="").strip().upper()
+    # Accepted findings are hidden by default: they are the work already done.
+    statuses = filter_cols[3].multiselect(
+        "Review status",
+        options=list(ReviewStatus),
+        default=[ReviewStatus.OPEN, ReviewStatus.NEEDS_ACTION],
+        format_func=lambda s: s.label,
+    )
+    search = filter_cols[4].text_input("Employee ID contains", value="").strip().upper()
 
     filtered = [
         issue
@@ -230,6 +267,7 @@ def render_review_table(result: ReconciliationResult) -> Issue | None:
             or (review_choice == REVIEW_FILTER[1] and issue.requires_review)
             or (review_choice == REVIEW_FILTER[2] and not issue.requires_review)
         )
+        and issue.review_status in statuses
         and (not search or search in issue.record_label.upper())
     ]
 
@@ -245,6 +283,9 @@ def render_review_table(result: ReconciliationResult) -> Issue | None:
         return None
 
     table = issues_table(filtered)
+    # The widget key follows the visible rows, so a selection never silently points at a
+    # different finding after a filter change or a saved decision removes a row.
+    rows_signature = hashlib.sha1("".join(fingerprint(issue) for issue in filtered).encode()).hexdigest()
     event = st.dataframe(
         table,
         hide_index=True,
@@ -252,7 +293,7 @@ def render_review_table(result: ReconciliationResult) -> Issue | None:
         height=min(560, 38 * (len(table) + 1)),
         on_select="rerun",
         selection_mode="single-row",
-        key="review_table",
+        key=f"review_table_{rows_signature[:12]}",
         column_config={
             "Explanation": st.column_config.TextColumn(width="large"),
             "Field": st.column_config.TextColumn(width="small"),
@@ -270,7 +311,8 @@ def issues_table(issues: list[Issue]) -> pd.DataFrame:
         {
             "Employee ID": [issue.record_label for issue in issues],
             "Cycle": [issue.dataset for issue in issues],
-            "Source row": ["" if issue.row_number is None else issue.row_number for issue in issues],
+            # Nullable integers render as blanks and keep the column numeric for Arrow.
+            "Source row": pd.array([issue.row_number for issue in issues], dtype="Int64"),
             "Category": [issue.category.label for issue in issues],
             "Field": [issue.field or "" for issue in issues],
             "Previous": [format_value(issue.previous_value) for issue in issues],
@@ -278,12 +320,13 @@ def issues_table(issues: list[Issue]) -> pd.DataFrame:
             "Change": [format_percentage(issue.change_percentage) for issue in issues],
             "Severity": [SEVERITY_LABEL[issue.severity] for issue in issues],
             "Review Required": ["Yes" if issue.requires_review else "No" for issue in issues],
+            "Status": [issue.review_status.label for issue in issues],
             "Explanation": [issue.message for issue in issues],
         }
     )
 
 
-def render_detail_panel(issue: Issue | None, rules: Rules) -> None:
+def render_detail_panel(issue: Issue | None, rules: Rules, history: ReviewHistory | None) -> None:
     st.subheader("4. Issue detail")
     if issue is None:
         st.caption(
@@ -319,6 +362,7 @@ def render_detail_panel(issue: Issue | None, rules: Rules) -> None:
             with st.expander("Record snapshot (both cycles)"):
                 st.dataframe(snapshot, hide_index=True, width="stretch")
 
+        render_review_decision(issue, history)
         render_ai_explanation(issue, rules, explanation)
 
 
@@ -396,6 +440,56 @@ def render_ai_explanation(issue: Issue, rules: Rules, explanation: Explanation) 
         st.caption("Generated text. It rephrases the deterministic finding and does not judge whether the change is correct.")
 
 
+def history_display_path(history: ReviewHistory) -> str:
+    try:
+        return history.path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(history.path)
+
+
+def render_review_decision(issue: Issue, history: ReviewHistory | None) -> None:
+    """Let the operator record what they decided; the engine never does this itself."""
+    st.markdown("**Review decision**")
+    if history is None:
+        st.caption("Review history is disabled in the rules file, so decisions are not stored.")
+        return
+
+    if issue.review_status is not ReviewStatus.OPEN:
+        who = f" by {issue.reviewed_by}" if issue.reviewed_by else ""
+        note = f" Note: {issue.review_note}" if issue.review_note else ""
+        st.caption(f"Current decision: {issue.review_status.label}{who} on {issue.reviewed_at}.{note}")
+
+    key = fingerprint(issue)[:12]  # widgets reset when a different finding is selected
+    status_col, note_col, reviewer_col = st.columns([2, 4, 2])
+    status = status_col.selectbox(
+        "Status",
+        options=list(ReviewStatus),
+        index=list(ReviewStatus).index(issue.review_status),
+        format_func=lambda s: s.label,
+        key=f"status_{key}",
+    )
+    note = note_col.text_input("Note (optional)", value=issue.review_note or "", key=f"note_{key}")
+    reviewer = reviewer_col.text_input("Reviewer (optional)", key="reviewer")
+    if st.button("Save decision", key=f"save_{key}"):
+        save_decision(issue, history, status, note, reviewer)
+        st.rerun()
+    st.caption(
+        "Accepted: verified, leaves the open queue and stays accepted if the same finding returns "
+        "with the same values. Needs action: known problem, stays in the queue until corrected. "
+        "Open: no decision yet."
+    )
+
+
+def save_decision(
+    issue: Issue, history: ReviewHistory, status: ReviewStatus, note: str, reviewer: str
+) -> None:
+    """Persist one decision and refresh the result so the table and summary reflect it."""
+    history.record(issue, status, note=note, reviewer=reviewer)
+    result: ReconciliationResult | None = st.session_state.get("result")
+    if result is not None:
+        st.session_state["result"] = apply_history(result, history)
+
+
 def render_exports(result: ReconciliationResult) -> None:
     st.subheader("5. Export")
     left, right, _ = st.columns([1, 1, 3])
@@ -414,8 +508,9 @@ def render_exports(result: ReconciliationResult) -> None:
         width="stretch",
     )
     st.caption(
-        f"Full report: {len(result.issues)} issues. Review queue: {len(result.review_queue)} issues "
-        "flagged for a human decision."
+        f"Full report: {len(result.issues)} issues with their review status. "
+        f"Review queue: {len(result.review_queue)} issues flagged for a human decision and not "
+        "yet accepted."
     )
 
 

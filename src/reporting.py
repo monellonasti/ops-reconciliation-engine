@@ -6,7 +6,7 @@ import io
 
 import pandas as pd
 
-from src.models import Category, Issue, ReconciliationResult, Severity, Summary
+from src.models import Category, Issue, ReconciliationResult, ReviewStatus, Severity, Summary
 
 # Categories and lifecycle rules that describe a *difference* between the two cycles,
 # as opposed to a problem within one dataset.
@@ -26,6 +26,10 @@ EXPORT_COLUMNS = [
     "requires_review",
     "rule",
     "message",
+    "review_status",
+    "review_note",
+    "reviewed_by",
+    "reviewed_at",
 ]
 
 
@@ -53,7 +57,8 @@ def build_summary(issues: list[Issue], previous_records: int, current_records: i
         by_severity[issue.severity] += 1
     review_records = {
         ("key", issue.employee_id) if issue.employee_id else (issue.dataset, issue.row_number)
-        for issue in issues if issue.requires_review
+        for issue in issues
+        if issue.requires_review and issue.review_status is not ReviewStatus.ACCEPTED
     }
     return Summary(
         previous_records=previous_records,
@@ -65,6 +70,8 @@ def build_summary(issues: list[Issue], previous_records: int, current_records: i
         info=by_severity[Severity.INFO],
         changes_detected=sum(is_change(issue) for issue in issues),
         records_requiring_review=len(review_records),
+        accepted_findings=sum(i.review_status is ReviewStatus.ACCEPTED for i in issues),
+        needs_action_findings=sum(i.review_status is ReviewStatus.NEEDS_ACTION for i in issues),
     )
 
 

@@ -106,6 +106,13 @@ class LifecycleRules(_StrictModel):
     end_date_changed: RuleOutcome = RuleOutcome(severity=Severity.WARNING)
 
 
+class HistoryRules(_StrictModel):
+    """Where operator decisions are kept between runs. Nothing is written until one is saved."""
+
+    enabled: bool = True
+    path: str = "history/review_history.sqlite"
+
+
 class Rules(_StrictModel):
     required_fields: list[str] = Field(
         default_factory=lambda: [
@@ -134,6 +141,7 @@ class Rules(_StrictModel):
     lifecycle: LifecycleRules = LifecycleRules()
     masked_fields: list[str] = Field(default_factory=lambda: ["iban"])
     date_format: str = "%Y-%m-%d"
+    history: HistoryRules = HistoryRules()
 
     @model_validator(mode="after")
     def _key_always_required(self) -> Rules:

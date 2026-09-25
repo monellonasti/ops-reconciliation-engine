@@ -29,3 +29,6 @@ Thumbs.db
 
 # CLI output written into the repository root
 reports/
+
+# Review decisions recorded by operators
+history/
