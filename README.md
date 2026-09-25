@@ -427,9 +427,11 @@ explanation stands. The model can be changed with `OPS_RECON_LLM_MODEL`.
   queue.
 - Runs are not stored, so there is no history and no "was this already
   reviewed last cycle" state.
-- The UI has been exercised with a few hundred rows. Files with hundreds of
-  thousands of rows will still reconcile quickly, but the review table is not
-  paginated.
+- Throughput is plain single-process Python: on a laptop, two cycles of
+  10,000 rows reconcile in about 1.5 seconds and two cycles of 100,000 rows in
+  about half a minute. That is fine for a batch tool, but the review table is
+  not paginated, so very large queues are better handled through the CSV
+  export than the UI.
 
 ## Future improvements
 

@@ -14,7 +14,7 @@ import streamlit as st
 
 from src.config import DEFAULT_RULES_PATH, REPO_ROOT, Rules, RulesConfigError, load_rules
 from src.engine import run_reconciliation
-from src.explain import explain_issue, explain_with_llm, llm_available
+from src.explain import Explanation, explain_issue, explain_with_llm, llm_available
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
 from src.models import (
     EXPECTED_COLUMNS,
@@ -343,7 +343,7 @@ def record_snapshot(issue: Issue, rules: Rules) -> pd.DataFrame | None:
     return pd.DataFrame(rows)
 
 
-def render_ai_explanation(issue: Issue, rules: Rules, explanation: Any) -> None:
+def render_ai_explanation(issue: Issue, rules: Rules, explanation: Explanation) -> None:
     st.markdown("**Optional: explain with AI**")
     if not llm_available():
         st.caption(
