@@ -55,6 +55,7 @@ class Category(StrEnum):
     CONTRACT_CHANGE = "contract_change"
     BONUS_ANOMALY = "bonus_anomaly"
     OVERTIME_ANOMALY = "overtime_anomaly"
+    EXPECTED_CHANGE = "expected_change"
 
     @property
     def label(self) -> str:
@@ -68,6 +69,7 @@ class Category(StrEnum):
             "contract_change": "Contract change",
             "bonus_anomaly": "Bonus anomaly",
             "overtime_anomaly": "Overtime anomaly",
+            "expected_change": "Expected change",
         }[self.value]
 
 
@@ -112,9 +114,14 @@ class Issue(BaseModel):
     review_note: str | None = None
     reviewed_by: str | None = None
     reviewed_at: str | None = None
+    # Set when an expected-changes file was supplied and this finding relates to an entry:
+    # the reference of the matching approval, or the value that was expected instead.
+    expected_reference: str | None = None
+    expected_mismatch: str | None = None
 
     @field_validator(
-        "employee_id", "field", "previous_value", "current_value", "message", "review_note"
+        "employee_id", "field", "previous_value", "current_value", "message", "review_note",
+        "expected_reference", "expected_mismatch",
     )
     @classmethod
     def _sanitize_text(cls, value):
@@ -141,6 +148,9 @@ class Summary(BaseModel):
     records_requiring_review: int
     accepted_findings: int = 0
     needs_action_findings: int = 0
+    expected_matched: int = 0
+    expected_mismatched: int = 0
+    expected_missing: int = 0
 
     @property
     def total_issues(self) -> int:

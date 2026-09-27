@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from src.config import RuleOutcome, Rules
+from src.expectations import ExpectedChanges
 from src.models import KEY_FIELD, NUMERIC_FIELDS, Category, Issue, Severity
 from src.utils import (
     display_value,
@@ -31,8 +32,17 @@ Row = dict[str, Any]
 Records = dict[str, Row]
 
 
-def reconcile(previous: ValidatedDataset, current: ValidatedDataset, rules: Rules) -> list[Issue]:
-    """Compare two validated cycles and return every lifecycle and field-change issue."""
+def reconcile(
+    previous: ValidatedDataset,
+    current: ValidatedDataset,
+    rules: Rules,
+    expected: ExpectedChanges | None = None,
+) -> list[Issue]:
+    """Compare two validated cycles and return every lifecycle and field-change issue.
+
+    With ``expected``, findings that match an approved change are downgraded and
+    approved changes that did not happen are reported.
+    """
     before = index_by_key(previous.frame)
     after = index_by_key(current.frame)
     ambiguous = set()
@@ -53,7 +63,17 @@ def reconcile(previous: ValidatedDataset, current: ValidatedDataset, rules: Rule
     issues += detect_removed_records(before, after, rules)
     for key in sorted(before.keys() & after.keys()):
         issues += compare_record(key, before[key], after[key], rules)
+    if expected is not None:
+        issues = [expected.apply(issue, _current_value(issue, after), rules) for issue in issues]
+        issues += expected.missing_issues(before, after, rules)
     return issues
+
+
+def _current_value(issue: Issue, after: Records) -> Any:
+    """Raw current-cycle value behind a change finding, for comparison with an expectation."""
+    if issue.employee_id in after and issue.field:
+        return after[issue.employee_id].get(issue.field)
+    return None
 
 
 def index_by_key(frame: pd.DataFrame) -> Records:

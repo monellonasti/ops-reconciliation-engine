@@ -30,6 +30,8 @@ EXPORT_COLUMNS = [
     "review_note",
     "reviewed_by",
     "reviewed_at",
+    "expected_reference",
+    "expected_mismatch",
 ]
 
 
@@ -72,6 +74,11 @@ def build_summary(issues: list[Issue], previous_records: int, current_records: i
         records_requiring_review=len(review_records),
         accepted_findings=sum(i.review_status is ReviewStatus.ACCEPTED for i in issues),
         needs_action_findings=sum(i.review_status is ReviewStatus.NEEDS_ACTION for i in issues),
+        expected_matched=sum(i.expected_reference is not None for i in issues),
+        expected_mismatched=sum(
+            i.expected_mismatch is not None and i.rule != "expected_change_missing" for i in issues
+        ),
+        expected_missing=sum(i.rule == "expected_change_missing" for i in issues),
     )
 
 

@@ -171,7 +171,7 @@ def test_exports_carry_the_review_state(history):
     full = pd.read_csv(pd.io.common.BytesIO(full_report_csv(result)))
     queue = pd.read_csv(pd.io.common.BytesIO(review_queue_csv(result)))
 
-    assert list(full.columns[-4:]) == ["review_status", "review_note", "reviewed_by", "reviewed_at"]
+    assert {"review_status", "review_note", "reviewed_by", "reviewed_at"} <= set(full.columns)
     assert full.loc[0, "review_status"] == "accepted"
     assert full.loc[0, "review_note"] == "Promotion"
     assert queue.empty

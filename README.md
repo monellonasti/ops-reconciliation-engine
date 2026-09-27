@@ -85,8 +85,12 @@ Previous dataset       Current dataset
   action, with a note and reviewer). When the same finding comes back in a
   later cycle it carries that decision: accepted exceptions leave the open
   queue, known problems are shown as such. Stored locally in SQLite.
+- Takes an optional list of expected changes (approved raises, transfers,
+  leavers, new hires, with a reference). A change that matches an entry is
+  downgraded to info, a change to a different value than approved says so,
+  and an approval that was never applied becomes a finding of its own.
 - Exports the full report and the review queue as CSV, including the review
-  status of every finding.
+  status of every finding and how it relates to the expected changes.
 - Masks the IBAN field in findings, tables, snapshots and exports; also redacts
   recognizable IBAN text misplaced in other fields. Configured sensitive fields
   are hidden in both value columns and finding messages.
@@ -107,7 +111,9 @@ salary changes at every severity, IBAN changes, a duplicated employee ID,
 missing fields, a row without a key, department and contract changes,
 excessive and negative overtime, bonus anomalies, an impossible date, a
 malformed email and a structurally broken line. `data/README.md` lists every
-injected scenario with its employee ID.
+injected scenario with its employee ID. The demo also loads
+`data/demo_expected_changes.csv`, nine approvals of which seven match, one
+was applied with a different value and one never happened.
 
 Everything in `data/` is synthetic and regenerated deterministically by
 `scripts/generate_demo_data.py`.
@@ -134,6 +140,7 @@ ops-reconciliation-engine/
 │   ├── engine.py               Orchestrates one run; also a small CLI
 │   ├── reporting.py            Summary counts, sorting, CSV exports
 │   ├── history.py              Review decisions kept between runs (SQLite)
+│   ├── expectations.py         Optional list of approved changes and how findings relate to it
 │   ├── explain.py              Template explanations, optional LLM rewrite
 │   └── utils.py                Masking, percentage change, formatting
 ├── sql/                        The same checks written as readable SQL
@@ -244,6 +251,9 @@ review_policy:                  # which severities land in the review queue
 history:                        # where operator decisions are kept between runs
   enabled: true
   path: history/review_history.sqlite
+
+expected_changes:               # an approved change that did not happen
+  missing_severity: warning
 ```
 
 Lifecycle events (new, removed, dates) and contract field changes each have
@@ -280,6 +290,42 @@ back as open: a salary accepted at 2,100 to 3,000 is not accepted at 3,000 to
 3,200. Nothing is written until an operator saves a decision; the engine never
 records or alters one on its own. The same history is applied by the CLI, so a
 scheduled run exports the review status too.
+
+### Expected changes
+
+Most legitimate changes are known before the export arrives: an approved
+raise, a transfer, a resignation, a new hire. An optional third CSV lists
+them so they do not have to be re-investigated:
+
+```csv
+employee_id,field,expected_value,reference
+EMP-00077,monthly_salary,4779,HR-2024-118 annual review
+EMP-00045,end_date,2024-09-30,resignation received 2024-08-12
+EMP-00201,new_record,,offer signed 2024-08-30
+```
+
+`field` is one of `monthly_salary`, `iban`, `contract_type`, `working_hours`,
+`department`, `start_date`, `end_date`, or the lifecycle events `new_record`
+and `removed_record` (with an empty `expected_value`). `reference` is free
+text shown next to the finding. The engine (`expectations.py`) compares the
+raw current value with the expected one, so a raise approved to 3,000 does
+not cover a raise to 30,000:
+
+- **Match** (same record, field and value): the finding is downgraded to
+  INFO, leaves the review queue and carries the reference. The fact itself
+  (percentage, values) is untouched and still exported.
+- **IBAN changes are the exception**: an expected IBAN change stays critical
+  and is only marked, because bank details are always confirmed by a person.
+- **Different value**: the finding keeps its severity and states what was
+  approved instead, so the mismatch is visible at a glance.
+- **Not applied**: an approval with no matching change becomes a finding
+  (`expected_change_missing`, severity `expected_changes.missing_severity`,
+  warning by default). An approval whose value is already in place is
+  silently satisfied.
+
+Problems in the file (unknown field, duplicate entry, blank ID) are errors,
+not skips: the file is small, hand-made and represents approvals, so a
+silently ignored row would be worse than a stopped run.
 
 ## Human-in-the-loop approach
 
@@ -395,6 +441,12 @@ Command-line run, useful for scripts and schedulers:
 python -m src.engine previous.csv current.csv --output-dir reports
 ```
 
+With a list of approved changes:
+
+```bash
+python -m src.engine previous.csv current.csv --expected approved_changes.csv --output-dir reports
+```
+
 Regenerate the demo data:
 
 ```bash
@@ -438,6 +490,8 @@ The demo data is synthetic, but the tool is designed as if it were not:
   note, the reviewer name and a timestamp to the SQLite file configured under
   `history`. Notes are free text: do not paste confidential data into them.
   Delete the file to forget every decision, or set `history.enabled: false`.
+- **The expected changes file** is processed in memory like the two cycles.
+  IBANs it contains are compared in full but never shown in full.
 - **No external calls by default.** The engine runs entirely locally. The
   only network call the code can make is the optional AI explanation, which
   requires an API key to be set explicitly and is triggered per finding by a
@@ -519,6 +573,4 @@ None of these exist today.
 - Anomaly trend analysis across cycles (a salary that drifts 10% every month
   is more interesting than any single 10% change), building on the run
   history above.
-- Expected changes as input: a list of approved changes that downgrades the
-  matching findings before anyone has to look at them.
 - Pagination and column sorting in the review table for very large exports.

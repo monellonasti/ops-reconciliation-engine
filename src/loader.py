@@ -3,6 +3,9 @@
 The loader deals only with the *shape* of the file: encoding, delimiter,
 header, column names and row structure. Interpreting the values (numbers,
 dates, required fields) is the job of :mod:`src.validators`.
+
+:func:`read_table` is the generic part (any CSV with a header);
+:func:`load_dataset` adds the employee schema on top of it.
 """
 
 from __future__ import annotations
@@ -25,12 +28,30 @@ logger = logging.getLogger(__name__)
 _ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
 _DELIMITERS = (",", ";", "\t", "|")
 
+Source = bytes | str | Path | IO[bytes] | Any
+
 
 class DatasetLoadError(Exception):
     """A problem with the file itself. The message is written for the operator."""
 
     def __init__(self, message: str):
         super().__init__(redact_iban_text(message))
+
+
+@dataclass
+class ParsedTable:
+    """A CSV file reduced to a header and clean rows (None for blank cells)."""
+
+    header: list[str]
+    rows: list[tuple[int, list[str | None]]]
+    skipped: list[tuple[int, int]] = field(default_factory=list)  # (line, fields found)
+    notes: list[str] = field(default_factory=list)
+
+    def records(self) -> list[dict[str, Any]]:
+        return [
+            {**dict(zip(self.header, cells, strict=True)), SOURCE_ROW: line}
+            for line, cells in self.rows
+        ]
 
 
 @dataclass
@@ -46,17 +67,9 @@ class LoadedDataset:
         return len(self.frame)
 
 
-def load_dataset(
-    source: bytes | str | Path | IO[bytes] | Any,
-    *,
-    name: Literal["previous", "current"],
-    rules: Rules,
-) -> LoadedDataset:
-    """Parse ``source`` (bytes, path or file-like) into a :class:`LoadedDataset`.
-
-    Raises :class:`DatasetLoadError` for problems that make the file unusable.
-    Row-level problems (wrong number of fields) become issues and the row is skipped.
-    """
+def read_table(source: Source) -> ParsedTable:
+    """Parse any CSV with a header row. Rows with the wrong number of fields are skipped
+    and listed in ``skipped``; file-level problems raise :class:`DatasetLoadError`."""
     raw = _read_bytes(source)
     if not raw.strip():
         raise DatasetLoadError("The file is empty.")
@@ -68,22 +81,38 @@ def load_dataset(
     if encoding != "utf-8-sig":
         notes.append(f"File was not UTF-8; decoded as {encoding}.")
 
-    delimiter = _detect_delimiter(text)
-    header, rows, issues = _parse_rows(text, delimiter, name, rules)
+    header, rows, skipped = _parse_rows(text, _detect_delimiter(text))
+    cleaned = [(line, [_clean_cell(cell) for cell in cells]) for line, cells in rows]
+    return ParsedTable(header=header, rows=cleaned, skipped=skipped, notes=notes)
+
+
+def load_dataset(source: Source, *, name: Literal["previous", "current"], rules: Rules) -> LoadedDataset:
+    """Parse ``source`` (bytes, path or file-like) into a :class:`LoadedDataset`.
+
+    Raises :class:`DatasetLoadError` for problems that make the file unusable.
+    Row-level problems (wrong number of fields) become issues and the row is skipped.
+    """
+    table = read_table(source)
+    issues = [
+        _malformed_row_issue(line, found, len(table.header), name, rules)
+        for line, found in table.skipped
+    ]
 
     # Plain Python objects (None for blanks) on purpose: the rule functions iterate
     # row by row, and object columns are much cheaper to iterate than Arrow strings.
-    cleaned = [[_clean_cell(cell) for cell in cells] for _, cells in rows]
-    frame = pd.DataFrame(cleaned, columns=header, dtype=object)
-    frame[SOURCE_ROW] = [line_number for line_number, _ in rows]
+    frame = pd.DataFrame([cells for _, cells in table.rows], columns=table.header, dtype=object)
+    frame[SOURCE_ROW] = [line for line, _ in table.rows]
 
     frame, column_notes = _align_columns(frame, rules)
-    notes.extend(column_notes)
+    notes = table.notes + column_notes
 
     logger.info("Loaded %s dataset: %d rows, %d skipped", name, len(frame), len(issues))
     return LoadedDataset(
-        name=name, frame=frame, issues=issues, notes=[redact_iban_text(note) for note in notes],
-        missing_columns=set(EXPECTED_COLUMNS) - set(header),
+        name=name,
+        frame=frame,
+        issues=issues,
+        notes=[redact_iban_text(note) for note in notes],
+        missing_columns=set(EXPECTED_COLUMNS) - set(table.header),
     )
 
 
@@ -127,8 +156,8 @@ def _detect_delimiter(text: str) -> str:
 
 
 def _parse_rows(
-    text: str, delimiter: str, name: str, rules: Rules
-) -> tuple[list[str], list[tuple[int, list[str]]], list[Issue]]:
+    text: str, delimiter: str
+) -> tuple[list[str], list[tuple[int, list[str]]], list[tuple[int, int]]]:
     reader = csv.reader(io.StringIO(text), delimiter=delimiter, strict=True)
     try:
         header_cells = next(reader)
@@ -141,14 +170,14 @@ def _parse_rows(
     _check_header(header)
 
     rows: list[tuple[int, list[str]]] = []
-    issues: list[Issue] = []
+    skipped: list[tuple[int, int]] = []
     try:
         for cells in reader:
             line_number = reader.line_num
             if not any(cell.strip() for cell in cells):
                 continue  # blank line, common at the end of hand-edited exports
             if len(cells) != len(header):
-                issues.append(_malformed_row_issue(line_number, len(cells), len(header), name, rules))
+                skipped.append((line_number, len(cells)))
                 continue
             rows.append((line_number, cells))
     except csv.Error as exc:
@@ -158,7 +187,7 @@ def _parse_rows(
 
     if not rows:
         raise DatasetLoadError("The file has a header but no data rows.")
-    return header, rows, issues
+    return header, rows, skipped
 
 
 def _normalize_column_name(cell: str) -> str:

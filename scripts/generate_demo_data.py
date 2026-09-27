@@ -58,6 +58,7 @@ DEPARTMENTS = {
 CONTRACT_TYPES = ["full_time"] * 14 + ["part_time"] * 3 + ["fixed_term"] * 2 + ["apprenticeship"]
 
 Record = dict[str, str]
+EXPECTED_CHANGE_COLUMNS = ["employee_id", "field", "expected_value", "reference"]
 
 
 def main() -> None:
@@ -79,10 +80,16 @@ def main() -> None:
                      "full_time,Operations,40,2400,0,2,2024-08-01,,UNEXPECTED\n")
     changes.append(("EMP-00206", "malformed row with an extra field (skipped by the loader)"))
 
+    approved = expected_changes(previous, current)
+    write_csv(DATA_DIR / "demo_expected_changes.csv", approved, EXPECTED_CHANGE_COLUMNS)
+
     print(f"Wrote {len(previous)} previous and {len(current)} current records to {DATA_DIR}")
     print("Injected scenarios:")
     for employee_id, description in changes:
         print(f"  {employee_id}: {description}")
+    print(f"Expected changes file: {len(approved)} entries")
+    for entry in approved:
+        print(f"  {entry['employee_id']}: {entry['field']} -> {entry['expected_value'] or '(lifecycle)'}")
 
 
 # --- base population ---------------------------------------------------------------
@@ -239,6 +246,38 @@ def current_cycle(previous: list[Record], rng: random.Random) -> tuple[list[Reco
 # --- helpers ---------------------------------------------------------------------------
 
 
+def expected_changes(previous: list[Record], current: list[Record]) -> list[Record]:
+    """Approvals an operator would know about before the run. Two are deliberately off:
+    one was applied with a different value, one was never applied."""
+    old_department = by_id(previous, "EMP-00005")["department"]
+    return [
+        {"employee_id": "EMP-00077", "field": "monthly_salary",
+         "expected_value": by_id(current, "EMP-00077")["monthly_salary"],
+         "reference": "HR-2024-118 annual review"},
+        {"employee_id": "EMP-00034", "field": "contract_type", "expected_value": "full_time",
+         "reference": "HR-2024-131 part-time to full-time"},
+        {"employee_id": "EMP-00034", "field": "working_hours", "expected_value": "40",
+         "reference": "HR-2024-131 part-time to full-time"},
+        {"employee_id": "EMP-00034", "field": "monthly_salary", "expected_value": "2400",
+         "reference": "HR-2024-131 part-time to full-time"},
+        {"employee_id": "EMP-00045", "field": "end_date", "expected_value": "2024-09-30",
+         "reference": "resignation received 2024-08-12"},
+        {"employee_id": "EMP-00201", "field": "new_record", "expected_value": "",
+         "reference": "offer signed 2024-08-30"},
+        {"employee_id": "EMP-00023", "field": "iban",
+         "expected_value": by_id(current, "EMP-00023")["iban"],
+         "reference": "employee request 2024-09-02"},
+        # Approved at +20% but applied at +22%: reported as a mismatch.
+        {"employee_id": "EMP-00099", "field": "monthly_salary",
+         "expected_value": str(round(float(by_id(previous, "EMP-00099")["monthly_salary"]) * 1.20)),
+         "reference": "HR-2024-140 annual review"},
+        # Approved transfer that never happened: reported as missing.
+        {"employee_id": "EMP-00005", "field": "department",
+         "expected_value": "Finance" if old_department != "Finance" else "Marketing",
+         "reference": "transfer request 2024-08-20"},
+    ]
+
+
 def by_id(records: list[Record], employee_id: str) -> Record:
     for record in records:
         if record["employee_id"] == employee_id:
@@ -246,9 +285,9 @@ def by_id(records: list[Record], employee_id: str) -> Record:
     raise KeyError(employee_id)
 
 
-def write_csv(path: Path, records: list[Record]) -> None:
+def write_csv(path: Path, records: list[Record], columns: list[str] = COLUMNS) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=COLUMNS, lineterminator="\n")
+        writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
         writer.writerows(records)
 

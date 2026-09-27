@@ -16,6 +16,7 @@ import streamlit as st
 
 from src.config import DEFAULT_RULES_PATH, REPO_ROOT, Rules, RulesConfigError, load_rules
 from src.engine import apply_history, run_reconciliation
+from src.expectations import EXPECTABLE_FIELDS, ExpectedChanges, load_expected_changes
 from src.explain import Explanation, explain_issue, explain_with_llm, llm_available
 from src.history import ReviewHistory, fingerprint, open_history
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
@@ -36,6 +37,7 @@ logger = logging.getLogger("ops_reconciliation.app")
 
 DEMO_PREVIOUS = REPO_ROOT / "data" / "demo_previous.csv"
 DEMO_CURRENT = REPO_ROOT / "data" / "demo_current.csv"
+DEMO_EXPECTED = REPO_ROOT / "data" / "demo_expected_changes.csv"
 
 SEVERITY_LABEL = {
     Severity.CRITICAL: "🔴 Critical",
@@ -71,6 +73,9 @@ def main() -> None:
     if (previous_label, current_label) == (DEMO_PREVIOUS.name, DEMO_CURRENT.name):
         st.caption("Synthetic demo data. No real people or bank accounts are represented.")
     st.markdown(f"**Comparing** `{previous_label}` (previous) **with** `{current_label}` (current)")
+    expected_info = st.session_state.get("expected")
+    if expected_info:
+        st.caption(f"Expected changes: {expected_info[1]} entries from `{expected_info[0]}`.")
     for note in result.notes:
         st.caption(f"Note: {note}")
 
@@ -130,7 +135,10 @@ def render_sidebar(rules: Rules, history: ReviewHistory | None) -> None:
         )
 
         if st.button("Reset session", width="stretch"):
-            for key in ("result", "previous", "current", "sources", "error", "ai_explanations", "run_rules", "upload_previous", "upload_current"):
+            for key in (
+                "result", "previous", "current", "sources", "error", "ai_explanations",
+                "run_rules", "expected", "upload_previous", "upload_current", "upload_expected",
+            ):
                 st.session_state.pop(key, None)
             st.query_params.pop("demo", None)
             st.rerun()
@@ -144,6 +152,17 @@ def render_inputs(rules: Rules, history: ReviewHistory | None) -> None:
     left, right = st.columns(2)
     previous_file = left.file_uploader("Previous cycle (CSV)", type=["csv"], key="upload_previous")
     current_file = right.file_uploader("Current cycle (CSV)", type=["csv"], key="upload_current")
+    expected_file = st.file_uploader(
+        "Expected changes (optional CSV)",
+        type=["csv"],
+        key="upload_expected",
+        help=(
+            "Columns: employee_id, field, expected_value, reference (optional). field is one of "
+            + ", ".join(EXPECTABLE_FIELDS)
+            + ". A change that matches an entry is downgraded to info (IBAN changes excepted); "
+            "an entry that did not happen becomes a finding."
+        ),
+    )
 
     run_col, demo_col, _ = st.columns([1, 1, 3])
     run_clicked = run_col.button(
@@ -159,10 +178,26 @@ def render_inputs(rules: Rules, history: ReviewHistory | None) -> None:
 
     if run_clicked and previous_file is not None and current_file is not None:
         run_pipeline(
-            previous_file, current_file, previous_file.name, current_file.name, rules, history
+            previous_file,
+            current_file,
+            previous_file.name,
+            current_file.name,
+            rules,
+            history,
+            expected_source=expected_file,
+            expected_label=expected_file.name if expected_file is not None else None,
         )
     elif demo_clicked or auto_demo:
-        run_pipeline(DEMO_PREVIOUS, DEMO_CURRENT, DEMO_PREVIOUS.name, DEMO_CURRENT.name, rules, history)
+        run_pipeline(
+            DEMO_PREVIOUS,
+            DEMO_CURRENT,
+            DEMO_PREVIOUS.name,
+            DEMO_CURRENT.name,
+            rules,
+            history,
+            expected_source=DEMO_EXPECTED,
+            expected_label=DEMO_EXPECTED.name,
+        )
 
 
 def run_pipeline(
@@ -172,10 +207,12 @@ def run_pipeline(
     current_label: str,
     rules: Rules,
     history: ReviewHistory | None = None,
+    expected_source: Any | None = None,
+    expected_label: str | None = None,
 ) -> None:
     st.session_state.pop("error", None)
     st.session_state.pop("ai_explanations", None)
-    for key in ("result", "previous", "current", "sources", "run_rules"):
+    for key in ("result", "previous", "current", "sources", "run_rules", "expected"):
         st.session_state.pop(key, None)
     try:
         previous = load_dataset(previous_source, name="previous", rules=rules)
@@ -187,8 +224,15 @@ def run_pipeline(
     except DatasetLoadError as exc:
         st.session_state["error"] = f"Current cycle ({current_label}): {exc}"
         return
+    expected: ExpectedChanges | None = None
+    if expected_source is not None:
+        try:
+            expected = load_expected_changes(expected_source)
+        except DatasetLoadError as exc:
+            st.session_state["error"] = f"Expected changes ({expected_label}): {exc}"
+            return
     try:
-        result = run_reconciliation(previous, current, rules, history)
+        result = run_reconciliation(previous, current, rules, history, expected)
     except Exception:
         logger.error("Unexpected error during reconciliation; input values omitted")
         st.session_state["error"] = (
@@ -203,6 +247,7 @@ def run_pipeline(
         current=current,
         sources=(previous_label, current_label),
         run_rules=rules.model_copy(deep=True),
+        expected=(expected_label, len(expected)) if expected is not None else None,
     )
 
 
@@ -321,9 +366,21 @@ def issues_table(issues: list[Issue]) -> pd.DataFrame:
             "Severity": [SEVERITY_LABEL[issue.severity] for issue in issues],
             "Review Required": ["Yes" if issue.requires_review else "No" for issue in issues],
             "Status": [issue.review_status.label for issue in issues],
+            "Expected": [expected_label(issue) for issue in issues],
             "Explanation": [issue.message for issue in issues],
         }
     )
+
+
+def expected_label(issue: Issue) -> str:
+    """How a finding relates to the expected changes file, for the table."""
+    if issue.expected_reference is not None:
+        return f"matches: {issue.expected_reference}"
+    if issue.rule == "expected_change_missing":
+        return "not applied"
+    if issue.expected_mismatch is not None:
+        return f"differs, expected {issue.expected_mismatch}"
+    return ""
 
 
 def render_detail_panel(issue: Issue | None, rules: Rules, history: ReviewHistory | None) -> None:

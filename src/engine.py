@@ -15,6 +15,7 @@ from typing import IO, Any
 
 from src.anomaly_detection import detect_anomalies
 from src.config import Rules, RulesConfigError, load_rules
+from src.expectations import ExpectedChanges, load_expected_changes
 from src.history import ReviewHistory, open_history
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
 from src.models import ReconciliationResult, ReviewStatus
@@ -30,10 +31,12 @@ def run_reconciliation(
     current: LoadedDataset,
     rules: Rules,
     history: ReviewHistory | None = None,
+    expected: ExpectedChanges | None = None,
 ) -> ReconciliationResult:
     """Full pipeline on two already-loaded datasets.
 
     With a ``history``, findings an operator already decided on carry that decision.
+    With ``expected`` changes, approved changes are downgraded and missing ones reported.
     """
     previous_validated = validate_dataset(previous, rules)
     current_validated = validate_dataset(current, rules)
@@ -43,7 +46,7 @@ def run_reconciliation(
         *current.issues,
         *previous_validated.issues,
         *current_validated.issues,
-        *reconcile(previous_validated, current_validated, rules),
+        *reconcile(previous_validated, current_validated, rules, expected),
         *detect_anomalies(current_validated, rules),
     ]
     issues = sort_issues(issues)
@@ -66,6 +69,12 @@ def run_reconciliation(
         notes.append("Some rows were skipped. Lifecycle findings may reflect incomplete exports; verify the source files.")
     if any(issue.rule == "duplicate_employee_id" for issue in issues):
         notes.append("Duplicate employee IDs were excluded from cross-cycle comparison in both cycles; review all candidate rows at source.")
+    if expected is not None:
+        notes.append(
+            f"Expected changes: {len(expected)} listed, {summary.expected_matched} matched "
+            f"(downgraded to info unless IBAN), {summary.expected_mismatched} applied with a "
+            f"different value, {summary.expected_missing} not found."
+        )
     return ReconciliationResult(issues=issues, summary=summary, notes=notes)
 
 
@@ -74,12 +83,14 @@ def reconcile_sources(
     current_source: bytes | str | Path | IO[bytes] | Any,
     rules: Rules | None = None,
     history: ReviewHistory | None = None,
+    expected_source: bytes | str | Path | IO[bytes] | Any | None = None,
 ) -> ReconciliationResult:
-    """Convenience wrapper: load both sources and run the pipeline."""
+    """Convenience wrapper: load the sources and run the pipeline."""
     rules = rules or load_rules()
     previous = load_dataset(previous_source, name="previous", rules=rules)
     current = load_dataset(current_source, name="current", rules=rules)
-    return run_reconciliation(previous, current, rules, history)
+    expected = load_expected_changes(expected_source) if expected_source is not None else None
+    return run_reconciliation(previous, current, rules, history, expected)
 
 
 def apply_history(result: ReconciliationResult, history: ReviewHistory) -> ReconciliationResult:
@@ -105,12 +116,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("current", type=Path, help="CSV export of the current cycle")
     parser.add_argument("--rules", type=Path, default=None, help="rules YAML (default: rules/validation_rules.yaml)")
     parser.add_argument("--output-dir", type=Path, default=Path("."), help="where to write the CSV reports")
+    parser.add_argument(
+        "--expected",
+        type=Path,
+        default=None,
+        help="optional CSV of approved changes (employee_id, field, expected_value, reference)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         rules = load_rules(args.rules)
-        result = reconcile_sources(args.previous, args.current, rules, history=open_history(rules))
+        result = reconcile_sources(
+            args.previous,
+            args.current,
+            rules,
+            history=open_history(rules),
+            expected_source=args.expected,
+        )
     except (DatasetLoadError, RulesConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -128,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"New: {summary.new_records}  Removed: {summary.removed_records}  Changes: {summary.changes_detected}")
     print(f"Critical: {summary.critical_issues}  Warnings: {summary.warnings}  Info: {summary.info}")
     print(f"Records requiring review: {summary.records_requiring_review}")
+    for note in result.notes:
+        print(f"Note: {note}")
     decided = sum(issue.review_status is not ReviewStatus.OPEN for issue in result.issues)
     if decided:
         print(

@@ -49,7 +49,62 @@ class Explanation(BaseModel):
 
 def explain_issue(issue: Issue, rules: Rules) -> Explanation:
     builder = _BUILDERS.get(issue.rule, _generic)
-    return builder(issue, rules)
+    explanation = builder(issue, rules)
+    if issue.rule == "expected_change_missing":
+        return explanation
+    if issue.expected_reference is not None:
+        return _with_expectation_matched(explanation, issue)
+    if issue.expected_mismatch is not None:
+        return _with_expectation_mismatch(explanation, issue)
+    return explanation
+
+
+def _with_expectation_matched(explanation: Explanation, issue: Issue) -> Explanation:
+    if issue.rule == "iban_change":
+        why = (
+            f"{explanation.why_flagged} This change is listed as expected ({issue.expected_reference}); "
+            "IBAN changes are still confirmed by a person."
+        )
+        actions = [
+            "Confirm the approval reference is genuine and refers to this employee.",
+            "Verify the new account holder before the next payment run.",
+        ]
+    else:
+        why = (
+            f"Listed as an expected change ({issue.expected_reference}) and the applied value matches, "
+            f"so the severity was lowered to info. Without the expectation: {explanation.why_flagged}"
+        )
+        actions = ["No action needed unless the approval record itself is wrong."]
+    return explanation.model_copy(update={"why_flagged": why, "suggested_actions": actions})
+
+
+def _with_expectation_mismatch(explanation: Explanation, issue: Issue) -> Explanation:
+    why = (
+        f"{explanation.why_flagged} A change was expected for this field, but to "
+        f"{issue.expected_mismatch}, not to the value that was applied."
+    )
+    actions = [
+        "Compare the applied value with the approval record and find out which one is wrong.",
+        *explanation.suggested_actions,
+    ]
+    return explanation.model_copy(update={"why_flagged": why, "suggested_actions": actions})
+
+
+def _expected_missing(issue: Issue, rules: Rules) -> Explanation:
+    return Explanation(
+        what_changed=issue.message,
+        why_flagged=(
+            "The expected changes file lists an approved change for this record that is not "
+            "reflected in the current cycle."
+        ),
+        rule_triggered=(
+            f"expected_changes.missing (severity {rules.expected_changes.missing_severity.value})"
+        ),
+        suggested_actions=[
+            "Check whether the change was applied in the source system after the export was taken.",
+            "Check whether the approval was withdrawn or postponed; update the expected changes file.",
+        ],
+    )
 
 
 def _salary_change(issue: Issue, rules: Rules) -> Explanation:
@@ -300,6 +355,7 @@ _BUILDERS: dict[str, Callable[[Issue, Rules], Explanation]] = {
     "malformed_row": _invalid,
     "bonus_ratio": _bonus,
     "overtime_hours": _overtime,
+    "expected_change_missing": _expected_missing,
 }
 
 

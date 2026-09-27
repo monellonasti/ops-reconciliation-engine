@@ -1,0 +1,10 @@
+employee_id,field,expected_value,reference
+EMP-00077,monthly_salary,4779,HR-2024-118 annual review
+EMP-00034,contract_type,full_time,HR-2024-131 part-time to full-time
+EMP-00034,working_hours,40,HR-2024-131 part-time to full-time
+EMP-00034,monthly_salary,2400,HR-2024-131 part-time to full-time
+EMP-00045,end_date,2024-09-30,resignation received 2024-08-12
+EMP-00201,new_record,,offer signed 2024-08-30
+EMP-00023,iban,IT95H3242229872186412300923,employee request 2024-09-02
+EMP-00099,monthly_salary,5280,HR-2024-140 annual review
+EMP-00005,department,Finance,transfer request 2024-08-20

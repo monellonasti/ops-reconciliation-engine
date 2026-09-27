@@ -64,9 +64,11 @@ def test_demo_dataset_fills_summary_table_and_exports():
     )
     assert list(review_table.columns) == [
         "Employee ID", "Cycle", "Source row", "Category", "Field", "Previous", "Current", "Change",
-        "Severity", "Review Required", "Status", "Explanation",
+        "Severity", "Review Required", "Status", "Expected", "Explanation",
     ]
-    assert len(review_table) == 46
+    assert len(review_table) == 47  # 46 findings plus one approved change that did not happen
+    assert any(cell.startswith("matches:") for cell in review_table["Expected"])
+    assert "not applied" in set(review_table["Expected"])
     assert set(review_table["Status"]) == {"Open"}  # isolated history: no decisions stored
     assert "" in set(review_table["Source row"]) and "175" in set(review_table["Source row"])
     assert set(review_table["Severity"]) == {"🔴 Critical", "🟠 Warning", "🔵 Info"}
@@ -233,6 +235,7 @@ def test_issues_table_formats_values_for_operators():
         "Severity": "🔴 Critical",
         "Review Required": "Yes",
         "Status": "Open",
+        "Expected": "",
         "Explanation": "Monthly salary increased by 42.86%.",
     }
 
@@ -278,5 +281,5 @@ def test_demo_run_shows_decisions_from_an_earlier_run(isolated_history, rules):
     assert not at.exception
     assert any("1 accepted" in caption.value for caption in at.caption)
     table = next(e.value for e in at.dataframe if "Employee ID" in e.value.columns)
-    assert len(table) == 45  # the accepted finding is hidden by the default status filter
+    assert len(table) == 46  # the accepted finding is hidden by the default status filter
     assert "Accepted" not in set(table["Status"])

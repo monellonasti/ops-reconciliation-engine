@@ -53,3 +53,12 @@ Anomalies and invalid values
 - `EMP-00188` has an `end_date` earlier than its `start_date`
 - `EMP-00056` has a malformed email
 - The last line of the file has one field too many and is skipped by the loader
+
+## Expected changes
+
+`demo_expected_changes.csv` lists the approvals an operator would know about
+before the run (`employee_id`, `field`, `expected_value`, `reference`). Seven
+of them match what happened and are downgraded to info (the IBAN one stays
+critical and is only marked); one salary was approved at +20% but applied at
++22% and is reported as a mismatch; one department transfer for `EMP-00005`
+was approved but never applied and is reported as missing.

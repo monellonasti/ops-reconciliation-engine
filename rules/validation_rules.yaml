@@ -83,3 +83,9 @@ date_format: "%Y-%m-%d"
 history:
   enabled: true
   path: history/review_history.sqlite
+
+# Expected changes (optional third CSV of approved changes). A change that matches
+# an entry is downgraded to info; one that was expected but did not happen is
+# reported with this severity. IBAN changes are never downgraded.
+expected_changes:
+  missing_severity: warning

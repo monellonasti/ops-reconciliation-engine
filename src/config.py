@@ -106,6 +106,12 @@ class LifecycleRules(_StrictModel):
     end_date_changed: RuleOutcome = RuleOutcome(severity=Severity.WARNING)
 
 
+class ExpectedChangeRules(_StrictModel):
+    """An approved change that did not happen is a finding with this severity."""
+
+    missing_severity: Severity = Severity.WARNING
+
+
 class HistoryRules(_StrictModel):
     """Where operator decisions are kept between runs. Nothing is written until one is saved."""
 
@@ -142,6 +148,7 @@ class Rules(_StrictModel):
     masked_fields: list[str] = Field(default_factory=lambda: ["iban"])
     date_format: str = "%Y-%m-%d"
     history: HistoryRules = HistoryRules()
+    expected_changes: ExpectedChangeRules = ExpectedChangeRules()
 
     @model_validator(mode="after")
     def _key_always_required(self) -> Rules:
