@@ -45,6 +45,19 @@ def csv_bytes(rows: Iterable[dict[str, object]], columns: Sequence[str] = EXPECT
     return buffer.getvalue().encode("utf-8")
 
 
+@pytest.fixture(autouse=True)
+def default_presentation():
+    """Every test starts in English with the default number and date formats."""
+    from src.i18n import set_language
+    from src.utils import reset_formats
+
+    set_language("en")
+    reset_formats()
+    yield
+    set_language("en")
+    reset_formats()
+
+
 @pytest.fixture(scope="session")
 def rules() -> Rules:
     return load_rules()

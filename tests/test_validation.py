@@ -139,7 +139,7 @@ def test_impossible_date_is_reported(make_loaded, rules):
 
 
 def test_wrong_date_format_is_reported(make_loaded, rules):
-    loaded = make_loaded([employee(start_date="15/01/2020")])
+    loaded = make_loaded([employee(start_date="2020/01/15")])
 
     issues = rules_of(validate_dataset(loaded, rules).issues, "invalid_date")
 

@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
+from datetime import date, datetime
 from typing import Any, Literal
 
 import pandas as pd
 
 from src.config import Rules
+from src.i18n import t
 from src.loader import LoadedDataset
 from src.models import (
     DATE_FIELDS,
@@ -33,10 +35,12 @@ from src.models import (
 )
 from src.utils import (
     display_value,
+    format_value,
     is_missing,
     is_valid_email,
     normalize_iban,
     normalize_text,
+    parse_number,
     redact_message,
 )
 
@@ -123,8 +127,8 @@ def coerce_numeric_columns(frame: pd.DataFrame, dataset: str, rules: Rules) -> l
         if column not in frame.columns:
             continue
         raw = frame[column]
-        numeric = pd.to_numeric(raw, errors="coerce")
-        invalid = raw.notna() & ~numeric.map(math.isfinite)
+        numeric = pd.to_numeric(raw.map(parse_number), errors="coerce")
+        invalid = raw.notna() & ~numeric.map(_is_finite)
         for row in frame.loc[invalid].to_dict("records"):
             issues.append(
                 factory.issue(
@@ -134,22 +138,44 @@ def coerce_numeric_columns(frame: pd.DataFrame, dataset: str, rules: Rules) -> l
                     rule="invalid_number",
                     severity=rules.invalid_values.severity,
                     value=row[column],
-                    message=f"{column} has an invalid or non-finite numeric value.",
+                    message=t("validators.invalid_number", column=column),
                 )
             )
         frame[column] = numeric.mask(invalid).astype("float64")
     return issues
 
 
+def _is_finite(value: Any) -> bool:
+    try:
+        return math.isfinite(value)
+    except TypeError:
+        return False
+
+
+def parse_dates(raw: pd.Series, formats: Sequence[str]) -> pd.Series:
+    """Try each configured text format; cells that already are dates (Excel) pass through."""
+    already = raw.map(lambda v: isinstance(v, (datetime, date)))
+    text = raw.where(~already)
+    parsed: pd.Series | None = None
+    for pattern in formats:
+        attempt = pd.to_datetime(text, format=pattern, errors="coerce")
+        parsed = attempt if parsed is None else parsed.fillna(attempt)
+    assert parsed is not None  # formats is never empty (validated in the rules)
+    if already.any():
+        parsed = parsed.fillna(pd.to_datetime(raw.where(already), errors="coerce"))
+    return parsed
+
+
 def coerce_date_columns(frame: pd.DataFrame, dataset: str, rules: Rules) -> list[Issue]:
     """Convert date columns in place; report cells that are not valid dates."""
     factory = IssueFactory(dataset, rules)  # type: ignore[arg-type]
     issues: list[Issue] = []
+    formats = rules.formats.input_date_formats
     for column in DATE_FIELDS:
         if column not in frame.columns:
             continue
         raw = frame[column]
-        parsed = pd.to_datetime(raw, format=rules.date_format, errors="coerce")
+        parsed = parse_dates(raw, formats)
         invalid = raw.notna() & parsed.isna()
         for row in frame.loc[invalid].to_dict("records"):
             issues.append(
@@ -160,9 +186,11 @@ def coerce_date_columns(frame: pd.DataFrame, dataset: str, rules: Rules) -> list
                     rule="invalid_date",
                     severity=rules.invalid_values.severity,
                     value=row[column],
-                    message=(
-                        f"{column} '{row[column]}' is not a valid date "
-                        f"(expected format {rules.date_format})."
+                    message=t(
+                        "validators.invalid_date",
+                        column=column,
+                        value=row[column],
+                        formats=" / ".join(formats),
                     ),
                 )
             )
@@ -183,13 +211,11 @@ def check_required_fields(rows: list[Row], dataset: str, rules: Rules) -> list[I
         for column in columns:
             if not is_missing(row[column]):
                 continue
-            if column == KEY_FIELD:
-                message = (
-                    "Required field employee_id is empty; "
-                    "the record cannot be matched across cycles."
-                )
-            else:
-                message = f"Required field {column} is empty."
+            message = (
+                t("validators.missing_key")
+                if column == KEY_FIELD
+                else t("validators.missing_field", column=column)
+            )
             issues.append(
                 factory.issue(
                     row,
@@ -254,7 +280,7 @@ def _duplicate_keys(rows: list[Row], dataset: str, rules: Rules) -> list[Issue]:
                 severity=rules.duplicates.employee_id,
                 requires_review=True,
                 value=key,
-                message=f"employee_id {key} appears {len(group)} times (rows {row_list}).",
+                message=t("validators.duplicate_key", key=key, count=len(group), rows=row_list),
             )
         )
     return issues
@@ -284,7 +310,7 @@ def _duplicate_values(
                     rule=f"duplicate_{column}",
                     severity=severity,
                     value=row[column],
-                    message=f"{column} is shared with {', '.join(others)}.",
+                    message=t("validators.duplicate_value", column=column, others=", ".join(others)),
                 )
             )
     return issues
@@ -292,7 +318,7 @@ def _duplicate_values(
 
 def _label(row: Row) -> str:
     key = normalize_text(row.get(KEY_FIELD))
-    return key if key else f"row {row[SOURCE_ROW]}"
+    return key if key else t("record.row", line=row[SOURCE_ROW])
 
 
 # --- value ranges --------------------------------------------------------------
@@ -314,7 +340,7 @@ def check_value_ranges(rows: list[Row], dataset: str, rules: Rules) -> list[Issu
                     rule="negative_salary",
                     severity=severity,
                     value=salary,
-                    message="monthly_salary is negative.",
+                    message=t("validators.negative_salary"),
                 )
             )
 
@@ -328,7 +354,9 @@ def check_value_ranges(rows: list[Row], dataset: str, rules: Rules) -> list[Issu
                     rule="end_before_start",
                     severity=severity,
                     value=end,
-                    message=f"end_date {end.date()} is earlier than start_date {start.date()}.",
+                    message=t(
+                        "validators.end_before_start", end=format_value(end), start=format_value(start)
+                    ),
                 )
             )
 
@@ -342,7 +370,7 @@ def check_value_ranges(rows: list[Row], dataset: str, rules: Rules) -> list[Issu
                     rule="malformed_email",
                     severity=rules.invalid_values.malformed_email_severity,
                     value=email,
-                    message=f"email '{email}' does not look like a valid address.",
+                    message=t("validators.malformed_email", email=email),
                 )
             )
     return issues

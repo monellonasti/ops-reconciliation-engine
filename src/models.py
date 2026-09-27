@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from src.i18n import t
 from src.utils import redact_iban_text
 
 # Column layout of the demo use case. The key field is what records are matched on.
@@ -44,6 +45,10 @@ class Severity(StrEnum):
     def rank(self) -> int:
         return {"info": 0, "warning": 1, "critical": 2}[self.value]
 
+    @property
+    def label(self) -> str:
+        return t(f"severity.{self.value}")
+
 
 class Category(StrEnum):
     LIFECYCLE = "lifecycle"
@@ -59,18 +64,7 @@ class Category(StrEnum):
 
     @property
     def label(self) -> str:
-        return {
-            "lifecycle": "Lifecycle",
-            "duplicate": "Duplicate",
-            "missing_data": "Missing data",
-            "invalid_value": "Invalid value",
-            "salary_change": "Salary change",
-            "iban_change": "IBAN change",
-            "contract_change": "Contract change",
-            "bonus_anomaly": "Bonus anomaly",
-            "overtime_anomaly": "Overtime anomaly",
-            "expected_change": "Expected change",
-        }[self.value]
+        return t(f"category.{self.value}")
 
 
 class ReviewStatus(StrEnum):
@@ -82,7 +76,7 @@ class ReviewStatus(StrEnum):
 
     @property
     def label(self) -> str:
-        return {"open": "Open", "accepted": "Accepted", "needs_action": "Needs action"}[self.value]
+        return t(f"status.{self.value}")
 
 
 class Issue(BaseModel):
@@ -132,8 +126,8 @@ class Issue(BaseModel):
         if self.employee_id:
             return self.employee_id
         if self.row_number is not None:
-            return f"row {self.row_number}"
-        return "unknown record"
+            return t("record.row", line=self.row_number)
+        return t("record.unknown")
 
 
 class Summary(BaseModel):

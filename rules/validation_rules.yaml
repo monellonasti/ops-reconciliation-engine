@@ -74,8 +74,18 @@ lifecycle:
 masked_fields:
   - iban
 
-# Expected date format in the CSV files (Python strptime syntax).
-date_format: "%Y-%m-%d"
+# Language of the interface, finding messages and explanations (en or it). The
+# sidebar can override it for a session. See rules/validation_rules.it.yaml for
+# a complete Italian profile.
+language: en
+
+# How numbers and dates are written in the input files and shown to people.
+# Italian exports: decimal_separator ",", thousands_separator ".", dates "%d/%m/%Y".
+formats:
+  input_date_formats: ["%Y-%m-%d", "%d/%m/%Y"]   # tried in this order
+  output_date_format: "%Y-%m-%d"
+  decimal_separator: "."
+  thousands_separator: ","
 
 # Review history: decisions operators record on findings (accepted, needs action)
 # are kept in this SQLite file and re-attached when the same finding comes back.

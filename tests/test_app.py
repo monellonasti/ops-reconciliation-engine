@@ -283,3 +283,43 @@ def test_demo_run_shows_decisions_from_an_earlier_run(isolated_history, rules):
     table = next(e.value for e in at.dataframe if "Employee ID" in e.value.columns)
     assert len(table) == 46  # the accepted finding is hidden by the default status filter
     assert "Accepted" not in set(table["Status"])
+
+
+# --- language ----------------------------------------------------------------------------
+
+
+def test_language_selector_switches_labels_and_messages_without_a_new_run():
+    at = click_button(run_app(), "Load demo dataset")
+    assert any(button.label == "Run reconciliation" for button in at.button)
+
+    language = next(box for box in at.selectbox if box.label == "Language")
+    language.set_value("it").run()
+
+    assert not at.exception
+    assert any(button.label == "Esegui riconciliazione" for button in at.button)
+    assert any(button.label == "Carica dati demo" for button in at.button)
+    metrics = {metric.label: str(metric.value) for metric in at.metric}
+    assert metrics["Record elaborati"] == "203"
+    table = next(e.value for e in at.dataframe if "ID dipendente" in e.value.columns)
+    assert len(table) == 47
+    assert "🔴 Critico" in set(table["Severità"])
+    assert any("Retribuzione mensile aumentata" in text for text in table["Spiegazione"])
+    assert not any("Monthly salary" in text for text in table["Spiegazione"])
+    assert not any(info.value.startswith("Rules changed") for info in at.info)
+
+    language = next(box for box in at.selectbox if box.label == "Lingua")
+    language.set_value("en").run()
+    assert not at.exception
+    assert any(button.label == "Run reconciliation" for button in at.button)
+
+
+def test_italian_rules_profile_drives_the_ui(monkeypatch):
+    monkeypatch.setenv("OPS_RECON_RULES", "rules/validation_rules.it.yaml")
+
+    at = click_button(run_app(), "Carica dati demo")
+
+    assert not at.exception
+    assert any("Confronto tra" in md.value for md in at.markdown)
+    table = next(e.value for e in at.dataframe if "ID dipendente" in e.value.columns)
+    assert any(cell.startswith("corrisponde:") for cell in table["Attesa"])
+    assert any("/" in cell for cell in table["Corrente"] if cell)  # dates shown as GG/MM/AAAA

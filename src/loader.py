@@ -1,10 +1,10 @@
-"""Read a CSV export into a clean, string-typed DataFrame with operator-friendly errors.
+"""Read a CSV or Excel export into a clean DataFrame with operator-friendly errors.
 
 The loader deals only with the *shape* of the file: encoding, delimiter,
 header, column names and row structure. Interpreting the values (numbers,
 dates, required fields) is the job of :mod:`src.validators`.
 
-:func:`read_table` is the generic part (any CSV with a header);
+:func:`read_table` is the generic part (any CSV or ``.xlsx`` with a header);
 :func:`load_dataset` adds the employee schema on top of it.
 """
 
@@ -14,12 +14,14 @@ import csv
 import io
 import logging
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import IO, Any, Literal
 
 import pandas as pd
 
 from src.config import Rules
+from src.i18n import t
 from src.models import EXPECTED_COLUMNS, KEY_FIELD, SOURCE_ROW, Category, Issue
 from src.utils import redact_iban_text
 
@@ -27,8 +29,10 @@ logger = logging.getLogger(__name__)
 
 _ENCODINGS = ("utf-8-sig", "cp1252", "latin-1")
 _DELIMITERS = (",", ";", "\t", "|")
+_XLSX_MAGIC = b"PK\x03\x04"  # .xlsx files are zip archives
 
 Source = bytes | str | Path | IO[bytes] | Any
+Cell = str | float | int | datetime | date | None
 
 
 class DatasetLoadError(Exception):
@@ -40,10 +44,14 @@ class DatasetLoadError(Exception):
 
 @dataclass
 class ParsedTable:
-    """A CSV file reduced to a header and clean rows (None for blank cells)."""
+    """A file reduced to a header and clean rows (None for blank cells).
+
+    CSV cells are text. Excel cells keep their type: numbers stay numbers and
+    dates stay dates, so the validators do not have to guess a text convention.
+    """
 
     header: list[str]
-    rows: list[tuple[int, list[str | None]]]
+    rows: list[tuple[int, list[Cell]]]
     skipped: list[tuple[int, int]] = field(default_factory=list)  # (line, fields found)
     notes: list[str] = field(default_factory=list)
 
@@ -68,20 +76,26 @@ class LoadedDataset:
 
 
 def read_table(source: Source) -> ParsedTable:
-    """Parse any CSV with a header row. Rows with the wrong number of fields are skipped
-    and listed in ``skipped``; file-level problems raise :class:`DatasetLoadError`."""
+    """Parse any CSV or ``.xlsx`` file with a header row.
+
+    CSV rows with the wrong number of fields are skipped and listed in
+    ``skipped``; file-level problems raise :class:`DatasetLoadError`.
+    """
     raw = _read_bytes(source)
     if not raw.strip():
-        raise DatasetLoadError("The file is empty.")
+        raise DatasetLoadError(t("loader.empty"))
+    if raw[:4] == _XLSX_MAGIC:
+        header, rows, notes = _read_excel(raw)
+        return ParsedTable(header=header, rows=rows, notes=notes)
 
     text, encoding = _decode(raw)
     if "\x00" in text:
-        raise DatasetLoadError("The file contains NUL characters. Save it as UTF-8 CSV and retry.")
+        raise DatasetLoadError(t("loader.nul"))
     notes: list[str] = []
     if encoding != "utf-8-sig":
-        notes.append(f"File was not UTF-8; decoded as {encoding}.")
+        notes.append(t("loader.not_utf8", encoding=encoding))
 
-    header, rows, skipped = _parse_rows(text, _detect_delimiter(text))
+    header, rows, skipped = _parse_csv(text, _detect_delimiter(text))
     cleaned = [(line, [_clean_cell(cell) for cell in cells]) for line, cells in rows]
     return ParsedTable(header=header, rows=cleaned, skipped=skipped, notes=notes)
 
@@ -131,9 +145,9 @@ def _read_bytes(source: Any) -> bytes:
     try:
         return path.read_bytes()
     except FileNotFoundError as exc:
-        raise DatasetLoadError(f"File not found: {path.name}") from exc
+        raise DatasetLoadError(t("loader.not_found", name=path.name)) from exc
     except OSError as exc:
-        raise DatasetLoadError(f"Could not read {path.name}: {exc.strerror}") from exc
+        raise DatasetLoadError(t("loader.unreadable", name=path.name, error=exc.strerror)) from exc
 
 
 def _decode(raw: bytes) -> tuple[str, str]:
@@ -142,7 +156,7 @@ def _decode(raw: bytes) -> tuple[str, str]:
             return raw.decode(encoding), encoding
         except UnicodeDecodeError:
             continue
-    raise DatasetLoadError("The file encoding is not supported. Save it as UTF-8 and retry.")
+    raise DatasetLoadError(t("loader.encoding"))
 
 
 def _detect_delimiter(text: str) -> str:
@@ -152,19 +166,19 @@ def _detect_delimiter(text: str) -> str:
     return best if counts[best] > 0 else ","
 
 
-# --- parsing ---------------------------------------------------------------
+# --- CSV parsing -------------------------------------------------------------
 
 
-def _parse_rows(
+def _parse_csv(
     text: str, delimiter: str
 ) -> tuple[list[str], list[tuple[int, list[str]]], list[tuple[int, int]]]:
     reader = csv.reader(io.StringIO(text), delimiter=delimiter, strict=True)
     try:
         header_cells = next(reader)
     except StopIteration as exc:
-        raise DatasetLoadError("The file has no header row.") from exc
+        raise DatasetLoadError(t("loader.no_header")) from exc
     except csv.Error as exc:
-        raise DatasetLoadError(f"The file could not be parsed as CSV: {exc}") from exc
+        raise DatasetLoadError(t("loader.parse_error", error=exc)) from exc
 
     header = [_normalize_column_name(cell) for cell in header_cells]
     _check_header(header)
@@ -181,13 +195,64 @@ def _parse_rows(
                 continue
             rows.append((line_number, cells))
     except csv.Error as exc:
-        raise DatasetLoadError(
-            f"The file could not be parsed as CSV near line {reader.line_num}: {exc}"
-        ) from exc
+        raise DatasetLoadError(t("loader.parse_error_near", line=reader.line_num, error=exc)) from exc
 
     if not rows:
-        raise DatasetLoadError("The file has a header but no data rows.")
+        raise DatasetLoadError(t("loader.no_rows"))
     return header, rows, skipped
+
+
+# --- Excel parsing -----------------------------------------------------------
+
+
+def _read_excel(raw: bytes) -> tuple[list[str], list[tuple[int, list[Cell]]], list[str]]:
+    """First sheet of an .xlsx workbook: row 1 is the header, values keep their types."""
+    try:
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    except Exception as exc:  # broken zip, wrong format, missing dependency: all the same to the operator
+        raise DatasetLoadError(t("loader.excel_error")) from exc
+
+    try:
+        sheet = workbook.worksheets[0]
+        notes = []
+        if len(workbook.worksheets) > 1:
+            notes.append(t("loader.excel_sheet", sheet=sheet.title, count=len(workbook.worksheets)))
+        lines = sheet.iter_rows(values_only=True)
+        header_cells = list(next(lines, ()))
+        while header_cells and _clean_excel_cell(header_cells[-1]) is None:
+            header_cells.pop()  # Excel pads the used range with empty trailing columns
+        if not header_cells:
+            raise DatasetLoadError(t("loader.no_header"))
+        header = [_normalize_column_name(str(_clean_excel_cell(cell) or "")) for cell in header_cells]
+        _check_header(header)
+
+        rows: list[tuple[int, list[Cell]]] = []
+        for index, cells in enumerate(lines, start=2):
+            values = [_clean_excel_cell(cell) for cell in cells[: len(header)]]
+            values += [None] * (len(header) - len(values))
+            if all(value is None for value in values):
+                continue
+            rows.append((index, values))
+    finally:
+        workbook.close()
+
+    if not rows:
+        raise DatasetLoadError(t("loader.no_rows"))
+    return header, rows, notes
+
+
+def _clean_excel_cell(value: Any) -> Cell:
+    if value is None or isinstance(value, bool):
+        return None if value is None else str(value)
+    if isinstance(value, (int, float, datetime, date)):
+        return value
+    text = str(value).strip()
+    return text or None
+
+
+# --- shared -----------------------------------------------------------------
 
 
 def _normalize_column_name(cell: str) -> str:
@@ -196,12 +261,12 @@ def _normalize_column_name(cell: str) -> str:
 
 def _check_header(header: list[str]) -> None:
     if SOURCE_ROW in header:
-        raise DatasetLoadError("Header contains reserved column source_row; rename it before uploading.")
+        raise DatasetLoadError(t("loader.reserved_header"))
     if not any(header):
-        raise DatasetLoadError("The file has no header row.")
+        raise DatasetLoadError(t("loader.no_header"))
     blanks = [index + 1 for index, name in enumerate(header) if not name]
     if blanks:
-        raise DatasetLoadError(f"Header has unnamed column(s) at position {blanks}.")
+        raise DatasetLoadError(t("loader.unnamed_columns", positions=blanks))
     seen: set[str] = set()
     duplicates: list[str] = []
     for name in header:
@@ -209,7 +274,7 @@ def _check_header(header: list[str]) -> None:
             duplicates.append(name)
         seen.add(name)
     if duplicates:
-        raise DatasetLoadError(f"Duplicate column name(s): {', '.join(duplicates)}.")
+        raise DatasetLoadError(t("loader.duplicate_columns", names=", ".join(duplicates)))
 
 
 def _clean_cell(value: Any) -> str | None:
@@ -230,7 +295,7 @@ def _malformed_row_issue(line: int, found: int, expected: int, name: str, rules:
         rule="malformed_row",
         severity=severity,
         requires_review=rules.requires_review(severity),
-        message=f"Row {line} has {found} fields, expected {expected}; the row was skipped.",
+        message=t("loader.malformed_row", line=line, found=found, expected=expected),
     )
 
 
@@ -243,8 +308,11 @@ def _align_columns(frame: pd.DataFrame, rules: Rules) -> tuple[pd.DataFrame, lis
     missing_required = [column for column in required if column not in frame.columns]
     if missing_required:
         raise DatasetLoadError(
-            f"Missing required column(s): {', '.join(missing_required)}. "
-            f"Found: {', '.join(c for c in frame.columns if c != SOURCE_ROW)}."
+            t(
+                "loader.missing_required_columns",
+                missing=", ".join(missing_required),
+                found=", ".join(c for c in frame.columns if c != SOURCE_ROW),
+            )
         )
 
     notes: list[str] = []
@@ -252,13 +320,10 @@ def _align_columns(frame: pd.DataFrame, rules: Rules) -> tuple[pd.DataFrame, lis
     if missing_optional:
         for column in missing_optional:
             frame[column] = None
-        notes.append(
-            "Optional column(s) not present, related checks skipped: "
-            + ", ".join(missing_optional)
-        )
+        notes.append(t("loader.optional_missing", columns=", ".join(missing_optional)))
 
     extra = [c for c in frame.columns if c not in EXPECTED_COLUMNS and c != SOURCE_ROW]
     if extra:
-        notes.append("Column(s) not used by any rule: " + ", ".join(extra))
+        notes.append(t("loader.extra_columns", columns=", ".join(extra)))
 
     return frame, notes

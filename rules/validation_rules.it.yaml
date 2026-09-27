@@ -1,0 +1,95 @@
+# Profilo italiano dell'Ops Reconciliation Engine.
+#
+# Stesse soglie del file predefinito (rules/validation_rules.yaml), ma interfaccia,
+# messaggi e spiegazioni in italiano, numeri con la virgola decimale e il punto delle
+# migliaia (2.100,50), date in formato GG/MM/AAAA accettate e mostrate.
+#
+# Per usarlo:  set OPS_RECON_RULES=rules/validation_rules.it.yaml   (Windows)
+#              export OPS_RECON_RULES=rules/validation_rules.it.yaml (macOS/Linux)
+# oppure       python -m src.engine ... --rules rules/validation_rules.it.yaml
+
+language: it
+
+formats:
+  input_date_formats: ["%d/%m/%Y", "%Y-%m-%d"]   # provati in quest'ordine
+  output_date_format: "%d/%m/%Y"
+  decimal_separator: ","
+  thousands_separator: "."
+
+# Campi che devono essere presenti e valorizzati su ogni record.
+# employee_id è la chiave del record ed è sempre obbligatorio.
+required_fields:
+  - employee_id
+  - first_name
+  - last_name
+  - contract_type
+  - monthly_salary
+
+# Quali severità finiscono nella coda di revisione umana.
+review_policy:
+  info: false
+  warning: true
+  critical: true
+
+missing_data:
+  severity: critical
+
+invalid_values:
+  severity: critical
+  malformed_email_severity: warning
+
+duplicates:
+  employee_id: critical         # vincolo fisso: gli ID duplicati richiedono sempre revisione
+  email: warning
+  iban: warning
+
+salary_change:
+  warning_percentage: 15        # variazione (in valore assoluto) oltre questa soglia: avviso
+  critical_percentage: 30       # oltre questa soglia: critico
+
+bonus:
+  warning_salary_ratio: 0.5     # bonus oltre il 50% della retribuzione mensile
+  critical_salary_ratio: 1.0    # bonus oltre il 100% della retribuzione mensile
+
+overtime:
+  minimum_hours: 0
+  warning_hours: 60
+  critical_hours: 100
+
+iban_change:
+  requires_review: true         # vincolo fisso
+  severity: critical            # non declassabile
+
+contract_changes:
+  contract_type:
+    severity: warning
+  working_hours:
+    severity: warning
+  department:
+    severity: info
+
+lifecycle:
+  new_record:
+    severity: info
+  removed_record:
+    severity: warning
+  start_date_changed:
+    severity: warning
+  end_date_added:
+    severity: warning
+  end_date_changed:
+    severity: warning
+
+# Colonne mai mostrate per intero. L'IBAN è sempre incluso.
+masked_fields:
+  - iban
+
+# Storico delle decisioni di revisione (file SQLite locale).
+history:
+  enabled: true
+  path: history/review_history.sqlite
+
+# Modifiche attese (terzo CSV facoltativo): una modifica approvata che non risulta
+# applicata viene segnalata con questa severità.
+expected_changes:
+  missing_severity: warning

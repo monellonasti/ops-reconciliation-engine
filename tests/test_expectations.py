@@ -326,7 +326,8 @@ def test_dates_compare_on_the_day():
 
     assert values_equal("start_date", "2024-12-31", pd.Timestamp("2024-12-31"), Rules())
     assert not values_equal("start_date", "2024-12-30", pd.Timestamp("2024-12-31"), Rules())
-    assert not values_equal("start_date", "31/12/2024", pd.Timestamp("2024-12-31"), Rules())
+    assert values_equal("start_date", "31/12/2024", pd.Timestamp("2024-12-31"), Rules())  # accepted input format
+    assert not values_equal("start_date", "2024/12/31", pd.Timestamp("2024-12-31"), Rules())
 
 
 # --- command line --------------------------------------------------------------------

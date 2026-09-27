@@ -9,8 +9,9 @@ from __future__ import annotations
 from typing import Any
 
 from src.config import Rules
+from src.i18n import t
 from src.models import Category, Issue, Severity
-from src.utils import format_value, is_missing
+from src.utils import format_number, format_value, is_missing
 from src.validators import IssueFactory, ValidatedDataset
 
 
@@ -57,9 +58,12 @@ def check_bonus(row: dict[str, Any], factory: IssueFactory, rules: Rules) -> lis
             rule="bonus_ratio",
             severity=severity,
             value=bonus,
-            message=(
-                f"Bonus {format_value(bonus)} is {ratio:.1f}% of monthly salary "
-                f"{format_value(salary)} (threshold {threshold:.0%})."
+            message=t(
+                "anomaly.bonus",
+                bonus=format_value(bonus),
+                ratio=format_number(ratio, 1),
+                salary=format_value(salary),
+                threshold=f"{threshold:.0%}",
             ),
         )
     ]
@@ -87,9 +91,13 @@ def check_overtime(row: dict[str, Any], factory: IssueFactory, rules: Rules) -> 
         return []
     if hours < rules.overtime.minimum_hours:
         message = (
-            f"Overtime hours are negative ({format_value(hours)})."
+            t("anomaly.overtime_negative", hours=format_value(hours))
             if rules.overtime.minimum_hours == 0
-            else f"Overtime of {format_value(hours)} hours is below the {format_value(rules.overtime.minimum_hours)}-hour minimum."
+            else t(
+                "anomaly.overtime_below",
+                hours=format_value(hours),
+                minimum=format_value(rules.overtime.minimum_hours),
+            )
         )
     else:
         limit = (
@@ -97,7 +105,7 @@ def check_overtime(row: dict[str, Any], factory: IssueFactory, rules: Rules) -> 
             if severity is Severity.CRITICAL
             else rules.overtime.warning_hours
         )
-        message = f"Overtime of {format_value(hours)} hours exceeds the {format_value(limit)}-hour threshold."
+        message = t("anomaly.overtime_exceeds", hours=format_value(hours), limit=format_value(limit))
     return [
         factory.issue(
             row,

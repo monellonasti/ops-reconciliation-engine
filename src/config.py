@@ -7,16 +7,20 @@ still behaves sensibly if a key is omitted from the file.
 
 from __future__ import annotations
 
+import os
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from src.i18n import available_languages
 from src.models import KEY_FIELD, Severity
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RULES_PATH = REPO_ROOT / "rules" / "validation_rules.yaml"
+RULES_PATH_ENV = "OPS_RECON_RULES"
 
 
 class RulesConfigError(Exception):
@@ -119,7 +123,38 @@ class HistoryRules(_StrictModel):
     path: str = "history/review_history.sqlite"
 
 
+class FormatRules(_StrictModel):
+    """How numbers and dates are written in the input files and shown to people.
+
+    The defaults read ``2,100.50`` and ``2024-09-30``; the Italian profile uses
+    ``2.100,50`` and ``30/09/2024``. Dates are tried in the listed order.
+    """
+
+    input_date_formats: list[str] = Field(default_factory=lambda: ["%Y-%m-%d", "%d/%m/%Y"])
+    output_date_format: str = "%Y-%m-%d"
+    decimal_separator: str = "."
+    thousands_separator: str = ","
+
+    @model_validator(mode="after")
+    def _consistent(self) -> FormatRules:
+        if self.decimal_separator not in (".", ","):
+            raise ValueError("decimal_separator must be '.' or ','")
+        if self.thousands_separator not in ("", ".", ",", "'", " "):
+            raise ValueError("thousands_separator must be '.', ',', an apostrophe, a space or empty")
+        if self.thousands_separator == self.decimal_separator:
+            raise ValueError("decimal_separator and thousands_separator must differ")
+        if not self.input_date_formats:
+            raise ValueError("input_date_formats must list at least one format")
+        for pattern in [*self.input_date_formats, self.output_date_format]:
+            try:
+                datetime(2024, 1, 31).strftime(pattern)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"invalid date format '{pattern}'") from exc
+        return self
+
+
 class Rules(_StrictModel):
+    language: str = "en"
     required_fields: list[str] = Field(
         default_factory=lambda: [
             "employee_id",
@@ -146,9 +181,17 @@ class Rules(_StrictModel):
     contract_changes: ContractChangeRules = ContractChangeRules()
     lifecycle: LifecycleRules = LifecycleRules()
     masked_fields: list[str] = Field(default_factory=lambda: ["iban"])
-    date_format: str = "%Y-%m-%d"
+    formats: FormatRules = FormatRules()
     history: HistoryRules = HistoryRules()
     expected_changes: ExpectedChangeRules = ExpectedChangeRules()
+
+    @field_validator("language")
+    @classmethod
+    def _known_language(cls, value: str) -> str:
+        code = value.strip().lower()
+        if code not in available_languages():
+            raise ValueError(f"language must be one of {', '.join(available_languages())}")
+        return code
 
     @model_validator(mode="after")
     def _key_always_required(self) -> Rules:
@@ -170,15 +213,26 @@ class Rules(_StrictModel):
         return self.requires_review(outcome.severity, outcome.requires_review)
 
 
+def default_rules_path() -> Path:
+    """The rules file to use when none is given: ``OPS_RECON_RULES`` if set, else the repository default."""
+    override = os.environ.get(RULES_PATH_ENV)
+    if override:
+        path = Path(override)
+        return path if path.is_absolute() else REPO_ROOT / path
+    return DEFAULT_RULES_PATH
+
+
 def load_rules(path: str | Path | None = None) -> Rules:
     """Read the YAML rules file.
 
-    With ``path=None`` the repository default is used; if that file is missing the
-    built-in defaults apply. An explicit path that does not exist is an error.
+    With ``path=None`` the file named by ``OPS_RECON_RULES`` is used, or the
+    repository default; if the repository default is missing the built-in
+    defaults apply. An explicit or environment-selected path that does not
+    exist is an error.
     """
-    rules_path = Path(path) if path is not None else DEFAULT_RULES_PATH
+    rules_path = Path(path) if path is not None else default_rules_path()
     if not rules_path.exists():
-        if path is None:
+        if path is None and rules_path == DEFAULT_RULES_PATH:
             return Rules()
         raise RulesConfigError(f"Rules file not found: {rules_path}")
 

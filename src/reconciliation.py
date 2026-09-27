@@ -14,15 +14,16 @@ import pandas as pd
 
 from src.config import RuleOutcome, Rules
 from src.expectations import ExpectedChanges
+from src.i18n import t
 from src.models import KEY_FIELD, NUMERIC_FIELDS, Category, Issue, Severity
 from src.utils import (
     display_value,
+    format_change,
     format_value,
     is_missing,
     mask_iban,
     normalize_iban,
     normalize_text,
-    format_change,
     percentage_change,
     redact_message,
 )
@@ -64,6 +65,7 @@ def reconcile(
     for key in sorted(before.keys() & after.keys()):
         issues += compare_record(key, before[key], after[key], rules)
     if expected is not None:
+        expected.reset()
         issues = [expected.apply(issue, _current_value(issue, after), rules) for issue in issues]
         issues += expected.missing_issues(before, after, rules)
     return issues
@@ -97,7 +99,7 @@ def detect_new_records(before: Records, after: Records, rules: Rules) -> list[Is
             rule="new_record",
             outcome=outcome,
             rules=rules,
-            message=f"New record{_name_suffix(after[key], rules)}: not present in the previous cycle.",
+            message=t("recon.new_record", name=_name_suffix(after[key], rules)),
         )
         for key in sorted(after.keys() - before.keys())
     ]
@@ -112,18 +114,17 @@ def detect_removed_records(before: Records, after: Records, rules: Rules) -> lis
             rule="removed_record",
             outcome=outcome,
             rules=rules,
-            message=(
-                f"Record removed{_name_suffix(before[key], rules)}: present in the previous cycle only."
-            ),
+            message=t("recon.removed_record", name=_name_suffix(before[key], rules)),
         )
         for key in sorted(before.keys() - after.keys())
     ]
 
 
 def _name_suffix(row: Row, rules: Rules) -> str:
-    parts = tuple(display_value(field, row.get(field), rules.masked_fields)
-                  for field in ("first_name", "last_name"))
-    name = " ".join(part for part in parts if part)
+    parts = tuple(
+        display_value(field, row.get(field), rules.masked_fields) for field in ("first_name", "last_name")
+    )
+    name = " ".join(str(part) for part in parts if part)
     return f" ({name})" if name else ""
 
 
@@ -182,7 +183,7 @@ def compare_salary(key: str, before: Row, after: Row, rules: Rules) -> list[Issu
             _change_issue(
                 key, field, prev, curr, rules,
                 category=Category.SALARY_CHANGE, rule="salary_change", severity=Severity.INFO,
-                message=f"Monthly salary set to {format_value(curr)}; no previous value to compare.",
+                message=t("recon.salary_set", current=format_value(curr)),
             )
         ]
 
@@ -192,23 +193,22 @@ def compare_salary(key: str, before: Row, after: Row, rules: Rules) -> list[Issu
             _change_issue(
                 key, field, prev, curr, rules,
                 category=Category.SALARY_CHANGE, rule="salary_change", severity=Severity.WARNING,
-                message=(
-                    f"Monthly salary changed from 0 to {format_value(curr)}; "
-                    "percentage not meaningful."
-                ),
+                message=t("recon.salary_from_zero", current=format_value(curr)),
             )
         ]
 
-    direction = "increased" if change > 0 else "decreased"
     thresholds = (rules.salary_change.warning_percentage, rules.salary_change.critical_percentage)
+    message_key = "recon.salary_increased" if change > 0 else "recon.salary_decreased"
     return [
         _change_issue(
             key, field, prev, curr, rules,
             category=Category.SALARY_CHANGE, rule="salary_change",
             severity=salary_change_severity(change, rules), change_percentage=round(change, 6),
-            message=(
-                f"Monthly salary {direction} by {format_change(change, thresholds)}% "
-                f"(from {format_value(prev)} to {format_value(curr)})."
+            message=t(
+                message_key,
+                pct=format_change(change, thresholds),
+                previous=format_value(prev),
+                current=format_value(curr),
             ),
         )
     ]
@@ -221,11 +221,11 @@ def compare_iban(key: str, before: Row, after: Row, rules: Rules) -> list[Issue]
         return []
 
     if prev_norm is None:
-        message = f"IBAN added ({mask_iban(curr)}); no IBAN in the previous cycle."
+        message = t("recon.iban_added", current=mask_iban(curr))
     elif curr_norm is None:
-        message = f"IBAN removed (was {mask_iban(prev)})."
+        message = t("recon.iban_removed", previous=mask_iban(prev))
     else:
-        message = f"IBAN changed from {mask_iban(prev)} to {mask_iban(curr)}."
+        message = t("recon.iban_changed", previous=mask_iban(prev), current=mask_iban(curr))
 
     return [
         _change_issue(
@@ -252,7 +252,7 @@ def compare_field(
             category=Category.CONTRACT_CHANGE, rule=f"{field}_change",
             severity=outcome.severity, requires_review=outcome.requires_review,
             change_percentage=change,
-            message=f"{field} changed from {_shown(prev)} to {_shown(curr)}.",
+            message=t("recon.field_changed", field=field, previous=_shown(prev), current=_shown(curr)),
         )
     ]
 
@@ -269,7 +269,12 @@ def compare_dates(key: str, before: Row, after: Row, rules: Rules) -> list[Issue
                 category=Category.LIFECYCLE, rule="start_date_changed",
                 severity=lifecycle.start_date_changed.severity,
                 requires_review=lifecycle.start_date_changed.requires_review,
-                message=f"start_date changed from {_shown(prev_start)} to {_shown(curr_start)}.",
+                message=t(
+                    "recon.field_changed",
+                    field="start_date",
+                    previous=_shown(prev_start),
+                    current=_shown(curr_start),
+                ),
             )
         )
 
@@ -281,7 +286,7 @@ def compare_dates(key: str, before: Row, after: Row, rules: Rules) -> list[Issue
                 category=Category.LIFECYCLE, rule="end_date_added",
                 severity=lifecycle.end_date_added.severity,
                 requires_review=lifecycle.end_date_added.requires_review,
-                message=f"end_date added: {format_value(curr_end)}.",
+                message=t("recon.end_date_added", current=format_value(curr_end)),
             )
         )
     elif not _same(prev_end, curr_end):
@@ -291,7 +296,9 @@ def compare_dates(key: str, before: Row, after: Row, rules: Rules) -> list[Issue
                 category=Category.LIFECYCLE, rule="end_date_changed",
                 severity=lifecycle.end_date_changed.severity,
                 requires_review=lifecycle.end_date_changed.requires_review,
-                message=f"end_date changed from {_shown(prev_end)} to {_shown(curr_end)}.",
+                message=t(
+                    "recon.field_changed", field="end_date", previous=_shown(prev_end), current=_shown(curr_end)
+                ),
             )
         )
     return issues
@@ -312,7 +319,7 @@ def _same(prev: Any, curr: Any) -> bool:
 
 
 def _shown(value: Any) -> str:
-    return format_value(value) or "empty"
+    return format_value(value) or t("value.empty")
 
 
 def _change_issue(

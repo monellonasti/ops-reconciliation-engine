@@ -17,13 +17,21 @@ from src.anomaly_detection import detect_anomalies
 from src.config import Rules, RulesConfigError, load_rules
 from src.expectations import ExpectedChanges, load_expected_changes
 from src.history import ReviewHistory, open_history
+from src.i18n import set_language, t
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
 from src.models import ReconciliationResult, ReviewStatus
 from src.reconciliation import reconcile
 from src.reporting import build_summary, full_report_csv, review_queue_csv, sort_issues
+from src.utils import configure_formats
 from src.validators import validate_dataset
 
 logger = logging.getLogger(__name__)
+
+
+def apply_presentation(rules: Rules) -> None:
+    """Select the language and the number/date formats of the rules for everything that follows."""
+    set_language(rules.language)
+    configure_formats(**rules.formats.model_dump())
 
 
 def run_reconciliation(
@@ -38,6 +46,7 @@ def run_reconciliation(
     With a ``history``, findings an operator already decided on carry that decision.
     With ``expected`` changes, approved changes are downgraded and missing ones reported.
     """
+    apply_presentation(rules)
     previous_validated = validate_dataset(previous, rules)
     current_validated = validate_dataset(current, rules)
 
@@ -66,14 +75,18 @@ def run_reconciliation(
     )
     notes = previous.notes + current.notes
     if previous.issues or current.issues:
-        notes.append("Some rows were skipped. Lifecycle findings may reflect incomplete exports; verify the source files.")
+        notes.append(t("note.rows_skipped"))
     if any(issue.rule == "duplicate_employee_id" for issue in issues):
-        notes.append("Duplicate employee IDs were excluded from cross-cycle comparison in both cycles; review all candidate rows at source.")
+        notes.append(t("note.duplicates_excluded"))
     if expected is not None:
         notes.append(
-            f"Expected changes: {len(expected)} listed, {summary.expected_matched} matched "
-            f"(downgraded to info unless IBAN), {summary.expected_mismatched} applied with a "
-            f"different value, {summary.expected_missing} not found."
+            t(
+                "note.expected",
+                listed=len(expected),
+                matched=summary.expected_matched,
+                mismatched=summary.expected_mismatched,
+                missing=summary.expected_missing,
+            )
         )
     return ReconciliationResult(issues=issues, summary=summary, notes=notes)
 
@@ -135,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_source=args.expected,
         )
     except (DatasetLoadError, RulesConfigError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(t("cli.error", error=exc), file=sys.stderr)
         return 1
 
     try:
@@ -143,23 +156,27 @@ def main(argv: list[str] | None = None) -> int:
         (args.output_dir / "reconciliation_report.csv").write_bytes(full_report_csv(result))
         (args.output_dir / "review_required.csv").write_bytes(review_queue_csv(result))
     except OSError:
-        print("Error: Could not write both reports. Check the output directory and permissions; a partial report may exist.", file=sys.stderr)
+        print(t("cli.write_error"), file=sys.stderr)
         return 1
 
     summary = result.summary
-    print(f"Records processed: {summary.current_records} (previous cycle: {summary.previous_records})")
-    print(f"New: {summary.new_records}  Removed: {summary.removed_records}  Changes: {summary.changes_detected}")
-    print(f"Critical: {summary.critical_issues}  Warnings: {summary.warnings}  Info: {summary.info}")
-    print(f"Records requiring review: {summary.records_requiring_review}")
+    print(t("cli.records", current=summary.current_records, previous=summary.previous_records))
+    print(t("cli.counts", new=summary.new_records, removed=summary.removed_records, changes=summary.changes_detected))
+    print(t("cli.severities", critical=summary.critical_issues, warnings=summary.warnings, info=summary.info))
+    print(t("cli.review", count=summary.records_requiring_review))
     for note in result.notes:
-        print(f"Note: {note}")
+        print(t("cli.note", note=note))
     decided = sum(issue.review_status is not ReviewStatus.OPEN for issue in result.issues)
     if decided:
         print(
-            f"Findings with a stored decision: {decided} "
-            f"({summary.accepted_findings} accepted, {summary.needs_action_findings} need action)"
+            t(
+                "cli.decided",
+                decided=decided,
+                accepted=summary.accepted_findings,
+                needs_action=summary.needs_action_findings,
+            )
         )
-    print(f"Reports written to {args.output_dir.resolve()}")
+    print(t("cli.written", path=args.output_dir.resolve()))
     return 0
 
 

@@ -1,4 +1,4 @@
-"""Expected changes: approvals known before the run, supplied as an optional CSV.
+"""Expected changes: approvals known before the run, supplied as an optional CSV or Excel file.
 
 The file has the columns ``employee_id``, ``field``, ``expected_value`` and an
 optional ``reference`` (ticket, approver, date). ``field`` is one of the
@@ -27,9 +27,17 @@ import pandas as pd
 from pydantic import BaseModel
 
 from src.config import Rules
+from src.i18n import t
 from src.loader import DatasetLoadError, Source, read_table
 from src.models import DATE_FIELDS, KEY_FIELD, NUMERIC_FIELDS, SOURCE_ROW, Category, Issue, Severity
-from src.utils import display_value, format_value, is_missing, normalize_iban, normalize_text
+from src.utils import (
+    display_value,
+    format_value,
+    is_missing,
+    normalize_iban,
+    normalize_text,
+    parse_number,
+)
 
 COMPARABLE_FIELDS = (
     "monthly_salary",
@@ -70,7 +78,7 @@ class ExpectedChange(BaseModel):
 
     @property
     def label(self) -> str:
-        return self.reference or f"expected changes row {self.row_number}"
+        return self.reference or t("expected.row_label", line=self.row_number)
 
 
 class ExpectedChanges:
@@ -84,6 +92,10 @@ class ExpectedChanges:
 
     def __len__(self) -> int:
         return len(self._by_key)
+
+    def reset(self) -> None:
+        """Forget which expectations were met, before a new run reuses this object."""
+        self._consumed.clear()
 
     def lookup(self, employee_id: str | None, field: str) -> ExpectedChange | None:
         return self._by_key.get((employee_id or "", field))
@@ -99,9 +111,9 @@ class ExpectedChanges:
         self._consumed.add((change.employee_id, change.field))
 
         if field in LIFECYCLE_EVENTS or values_equal(field, change.expected_value, actual, rules):
-            note = f"Matches expected change ({change.label})."
+            note = t("expected.matches", reference=change.label)
             if issue.rule in _NEVER_DOWNGRADED:
-                note += " IBAN changes are always reviewed."
+                note = f"{note} {t('expected.iban_reviewed')}"
                 return issue.model_copy(
                     update={"message": f"{issue.message} {note}", "expected_reference": change.label}
                 )
@@ -117,7 +129,7 @@ class ExpectedChanges:
         shown = _shown_expected(field, change.expected_value, rules)
         return issue.model_copy(
             update={
-                "message": f"{issue.message} Differs from the expected value {shown} ({change.label}).",
+                "message": f"{issue.message} {t('expected.differs', expected=shown, reference=change.label)}",
                 "expected_mismatch": str(shown),
             }
         )
@@ -159,19 +171,18 @@ class ExpectedChanges:
 
 
 def load_expected_changes(source: Source) -> ExpectedChanges:
-    """Read the expected changes CSV. Every row must be usable: this file is small,
+    """Read the expected changes file. Every row must be usable: this file is small,
     hand-made and represents approvals, so problems are errors rather than skips."""
     table = read_table(source)
     required = ("employee_id", "field", "expected_value")
     missing = [column for column in required if column not in table.header]
     if missing:
         raise DatasetLoadError(
-            f"Expected changes file: missing column(s) {', '.join(missing)}. "
-            f"Required: {', '.join(required)}; optional: reference."
+            t("expected.load.missing_columns", missing=", ".join(missing), required=", ".join(required))
         )
     if table.skipped:
         lines = ", ".join(str(line) for line, _ in table.skipped)
-        raise DatasetLoadError(f"Expected changes file: row(s) {lines} have the wrong number of fields.")
+        raise DatasetLoadError(t("expected.load.bad_rows", lines=lines))
 
     changes: list[ExpectedChange] = []
     problems: list[str] = []
@@ -180,17 +191,19 @@ def load_expected_changes(source: Source) -> ExpectedChanges:
         line = record[SOURCE_ROW]
         employee_id = normalize_text(record.get(KEY_FIELD))
         field = (normalize_text(record.get("field")) or "").lower()
-        value = normalize_text(record.get("expected_value"))
+        value = _expected_text(record.get("expected_value"))
         if not employee_id:
-            problems.append(f"row {line}: employee_id is empty")
+            problems.append(t("expected.load.empty_id", line=line))
         elif field not in EXPECTABLE_FIELDS:
-            problems.append(f"row {line}: field '{field}' is not one of {', '.join(EXPECTABLE_FIELDS)}")
+            problems.append(
+                t("expected.load.bad_field", line=line, field=field, allowed=", ".join(EXPECTABLE_FIELDS))
+            )
         elif field in COMPARABLE_FIELDS and value is None:
-            problems.append(f"row {line}: expected_value is required for {field}")
+            problems.append(t("expected.load.value_required", line=line, field=field))
         elif field in LIFECYCLE_EVENTS and value is not None:
-            problems.append(f"row {line}: expected_value must be empty for {field}")
+            problems.append(t("expected.load.value_forbidden", line=line, field=field))
         elif (employee_id, field) in seen:
-            problems.append(f"row {line}: {employee_id} / {field} is listed more than once")
+            problems.append(t("expected.load.duplicate", line=line, key=employee_id, field=field))
         else:
             seen.add((employee_id, field))
             changes.append(
@@ -203,29 +216,55 @@ def load_expected_changes(source: Source) -> ExpectedChanges:
                 )
             )
     if problems:
-        shown = "; ".join(problems[:5]) + (f"; and {len(problems) - 5} more" if len(problems) > 5 else "")
-        raise DatasetLoadError(f"Expected changes file: {shown}.")
+        shown = "; ".join(problems[:5])
+        if len(problems) > 5:
+            shown += t("expected.load.more", count=len(problems) - 5)
+        raise DatasetLoadError(t("expected.load.problems", problems=shown))
     return ExpectedChanges(changes)
+
+
+def _expected_text(value: Any) -> str | None:
+    """Excel gives numbers and dates as objects; keep a canonical text form for them."""
+    if is_missing(value):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        return str(int(number)) if number.is_integer() else repr(number)
+    if hasattr(value, "date"):
+        return value.date().isoformat() if hasattr(value.date(), "isoformat") else str(value)
+    return normalize_text(value)
 
 
 # --- helpers -------------------------------------------------------------------------
 
 
 def values_equal(field: str, expected: str | None, actual: Any, rules: Rules) -> bool:
-    """Compare an expected value written in the CSV with the typed value of the current cycle."""
+    """Compare an expected value written in the file with the typed value of the current cycle."""
     if expected is None or is_missing(actual):
         return expected is None and is_missing(actual)
     if field in NUMERIC_FIELDS:
-        try:
-            return float(expected) == float(actual)
-        except (TypeError, ValueError):
-            return False
+        number = parse_number(expected)
+        if number is None:
+            # Excel or ISO-style text ("2400.5") is accepted regardless of the input convention.
+            try:
+                number = float(expected)
+            except ValueError:
+                return False
+        return number == float(actual)
     if field in DATE_FIELDS:
-        parsed = pd.to_datetime(expected, format=rules.date_format, errors="coerce")
-        return not pd.isna(parsed) and pd.Timestamp(actual).normalize() == parsed.normalize()
+        parsed = _parse_expected_date(expected, rules)
+        return parsed is not None and pd.Timestamp(actual).normalize() == parsed.normalize()
     if field == "iban":
         return normalize_iban(expected) == normalize_iban(actual)
     return (normalize_text(expected) or "").lower() == (normalize_text(actual) or "").lower()
+
+
+def _parse_expected_date(text: str, rules: Rules) -> pd.Timestamp | None:
+    for pattern in [*rules.formats.input_date_formats, "%Y-%m-%d"]:
+        parsed = pd.to_datetime(text, format=pattern, errors="coerce")
+        if not pd.isna(parsed):
+            return parsed
+    return None
 
 
 def _shown_expected(field: str, expected: str | None, rules: Rules) -> str | float | None:
@@ -233,10 +272,16 @@ def _shown_expected(field: str, expected: str | None, rules: Rules) -> str | flo
     if expected is None:
         return None
     if field in NUMERIC_FIELDS:
-        try:
-            return format_value(float(expected))
-        except ValueError:
-            return expected
+        number = parse_number(expected)
+        if number is None:
+            try:
+                number = float(expected)
+            except ValueError:
+                return expected
+        return format_value(number)
+    if field in DATE_FIELDS:
+        parsed = _parse_expected_date(expected, rules)
+        return format_value(parsed) if parsed is not None else expected
     return display_value(field, expected, rules.masked_fields)
 
 
@@ -246,18 +291,18 @@ def _missing_message(
     key = change.employee_id
     if change.field == "new_record":
         if in_after and in_before:
-            return f"Expected {key} as a new record ({change.label}) but it already existed in the previous cycle."
-        return f"Expected {key} as a new record ({change.label}) but it is not present in the current cycle."
+            return t("expected.missing.new_existed", key=key, reference=change.label)
+        return t("expected.missing.new_absent", key=key, reference=change.label)
     if change.field == "removed_record":
         if in_after:
-            return f"Expected {key} to be removed ({change.label}) but it is still present in the current cycle."
-        return f"Expected {key} to be removed ({change.label}) but it was not present in the previous cycle either."
+            return t("expected.missing.removed_present", key=key, reference=change.label)
+        return t("expected.missing.removed_absent", key=key, reference=change.label)
 
     expected = _shown_expected(change.field, change.expected_value, rules)
-    head = f"Expected {change.field} to become {expected} ({change.label})"
+    head = t("expected.missing.head", field=change.field, expected=expected, reference=change.label)
     if not in_after and not in_before:
-        return f"{head} but the record is not present in either cycle."
+        return t("expected.missing.neither", head=head)
     if not in_after:
-        return f"{head} but the record is absent from the current cycle."
+        return t("expected.missing.absent", head=head)
     shown = display_value(change.field, current, rules.masked_fields)
-    return f"{head} but the current value is {format_value(shown) or 'empty'}."
+    return t("expected.missing.current", head=head, current=format_value(shown) or t("value.empty"))

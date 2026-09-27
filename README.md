@@ -15,6 +15,10 @@ and has a stable record key.
 
 ![Issue detail](docs/screenshot-detail.png)
 
+The same run with the interface switched to Italian from the sidebar:
+
+![Review queue in Italian](docs/screenshot-dashboard-it.png)
+
 ## The problem
 
 Operations teams receive the same export every week or month and have to
@@ -65,9 +69,14 @@ Previous dataset       Current dataset
 
 ## Features
 
-- Loads CSV exports with encoding fallback, delimiter detection, header checks
-  (duplicate or missing columns) and per-row structure checks; common input problems
-  are reported in plain language.
+- Loads CSV and Excel (`.xlsx`) exports with encoding fallback, delimiter
+  detection, header checks (duplicate or missing columns) and per-row structure
+  checks; common input problems are reported in plain language.
+- Reads numbers and dates in the convention of the export (`2,100.50` and
+  `2024-09-30`, or `2.100,50` and `30/09/2024` with the Italian profile) and
+  refuses to guess when a value is written in the other convention.
+- Speaks English or Italian: interface, finding messages and explanations come
+  from one translation catalog, selected in the rules file or from the sidebar.
 - Validates each cycle on its own: required fields, numeric and date types,
   duplicate keys, duplicate emails and IBANs, negative salaries, impossible
   dates, end dates before start dates, malformed emails.
@@ -129,7 +138,8 @@ python -m src.engine data/demo_previous.csv data/demo_current.csv --output-dir r
 ```
 ops-reconciliation-engine/
 ├── app.py                      Streamlit UI (thin: layout, filters, session state)
-├── rules/validation_rules.yaml Business thresholds and severities
+├── rules/validation_rules.yaml Business thresholds, formats and language
+├── rules/validation_rules.it.yaml  Same thresholds, Italian language and formats
 ├── src/
 │   ├── models.py               Issue, Summary, ReconciliationResult, column layout
 │   ├── config.py               YAML -> validated Rules object (Pydantic)
@@ -141,6 +151,7 @@ ops-reconciliation-engine/
 │   ├── reporting.py            Summary counts, sorting, CSV exports
 │   ├── history.py              Review decisions kept between runs (SQLite)
 │   ├── expectations.py         Optional list of approved changes and how findings relate to it
+│   ├── i18n/                   Text catalogs (en, it) and the t() lookup
 │   ├── explain.py              Template explanations, optional LLM rewrite
 │   └── utils.py                Masking, percentage change, formatting
 ├── sql/                        The same checks written as readable SQL
@@ -327,6 +338,43 @@ Problems in the file (unknown field, duplicate entry, blank ID) are errors,
 not skips: the file is small, hand-made and represents approvals, so a
 silently ignored row would be worse than a stopped run.
 
+### Input formats and language
+
+Exports from Italian systems usually come with a semicolon delimiter, a
+decimal comma, a dot for thousands and dates as `GG/MM/AAAA`. The delimiter
+is detected per file; the number and date conventions are declared once in
+the rules file, because `2.100` is 2,100 in one convention and 2.1 in the
+other and no parser can tell them apart from the text alone:
+
+```yaml
+language: it
+
+formats:
+  input_date_formats: ["%d/%m/%Y", "%Y-%m-%d"]   # tried in this order
+  output_date_format: "%d/%m/%Y"
+  decimal_separator: ","
+  thousands_separator: "."
+```
+
+A number written in the other convention (`2100.5` under the Italian
+profile) is reported as invalid rather than misread, because the thousands
+grouping does not add up. Excel files are not affected: their numbers and
+dates arrive typed and skip the text conventions altogether. Values stored
+in findings stay canonical (floats, ISO dates), so exports and review-history
+fingerprints do not change when the display convention does; only messages,
+tables and explanations follow the configured formats.
+
+`language` selects the catalog under `src/i18n/`. Every user-facing string
+has a key there; English is the reference and a missing translation falls
+back to it. Rule identifiers, column names and CSV headers are never
+translated: they are data. The sidebar lets an operator switch language for
+the session, and the current result is re-rendered from the loaded files
+without asking for a new run.
+
+`rules/validation_rules.it.yaml` is a complete Italian profile with the same
+thresholds as the default file. Select a rules file with the `OPS_RECON_RULES`
+environment variable (UI) or `--rules` (CLI).
+
 ## Human-in-the-loop approach
 
 The engine distinguishes **detection** from **decision**.
@@ -425,15 +473,25 @@ The browser opens at `http://localhost:8501`. Click **Load demo dataset**, or
 upload your own previous and current CSV exports with the columns described
 below.
 
-Expected columns (header names are case-insensitive, spaces become
-underscores): `employee_id`, `first_name`, `last_name`, `email`, `iban`,
+Files may be CSV (any common delimiter, UTF-8 or Windows encodings) or
+Excel `.xlsx` (first sheet, header in row 1). Expected columns (header names
+are case-insensitive, spaces become underscores): `employee_id`, `first_name`, `last_name`, `email`, `iban`,
 `contract_type`, `department`, `working_hours`, `monthly_salary`, `bonus`,
 `overtime_hours`, `start_date`, `end_date`. The required ones are those in
 `required_fields`; the others may be absent. Comparisons of an absent column
 are skipped in both cycles, while single-cycle checks still use available
 values. Notes identify absent columns. Blank cells in present columns remain
 actual missing values, so an explicitly cleared IBAN is still a critical change. Dates are expected as
-`YYYY-MM-DD` (configurable in the rules file).
+`YYYY-MM-DD` or `DD/MM/YYYY` by default (configurable under `formats`).
+
+Italian interface and formats:
+
+```bash
+set OPS_RECON_RULES=rules/validation_rules.it.yaml
+streamlit run app.py
+```
+
+(`export` instead of `set` on macOS and Linux.)
 
 Command-line run, useful for scripts and schedulers:
 

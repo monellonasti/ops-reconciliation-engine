@@ -1,10 +1,11 @@
 """Explain a finding to an operator: what changed, why it was flagged, what to check.
 
-Explanations are built from templates, so the application works with no
-external services. If an Anthropic API key is configured *and* the optional
-``anthropic`` package is installed, a natural-language rewrite can be
-requested for one issue at a time. The model never decides whether a change
-is legitimate; it only rephrases a finding the engine has already made.
+Explanations are built from templates in the configured language, so the
+application works with no external services. If an Anthropic API key is
+configured *and* the optional ``anthropic`` package is installed, a
+natural-language rewrite can be requested for one issue at a time. The model
+never decides whether a change is legitimate; it only rephrases a finding the
+engine has already made.
 """
 
 from __future__ import annotations
@@ -18,8 +19,9 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from src.config import Rules
+from src.i18n import t, t_list
 from src.models import Issue, Severity
-from src.utils import format_change, format_value, redact_iban_text
+from src.utils import format_change, format_plain, format_value, redact_iban_text
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +38,12 @@ class Explanation(BaseModel):
 
     def as_text(self) -> str:
         actions = "\n".join(f"- {action}" for action in self.suggested_actions)
-        return (
-            f"What changed: {self.what_changed}\n"
-            f"Why it was flagged: {self.why_flagged}\n"
-            f"Rule triggered: {self.rule_triggered}\n"
-            f"Suggested checks:\n{actions}"
+        return t(
+            "explain.text",
+            what=self.what_changed,
+            why=self.why_flagged,
+            rule=self.rule_triggered,
+            actions=actions,
         )
 
 
@@ -61,87 +64,54 @@ def explain_issue(issue: Issue, rules: Rules) -> Explanation:
 
 def _with_expectation_matched(explanation: Explanation, issue: Issue) -> Explanation:
     if issue.rule == "iban_change":
-        why = (
-            f"{explanation.why_flagged} This change is listed as expected ({issue.expected_reference}); "
-            "IBAN changes are still confirmed by a person."
-        )
-        actions = [
-            "Confirm the approval reference is genuine and refers to this employee.",
-            "Verify the new account holder before the next payment run.",
-        ]
+        why = t("explain.expectation.iban_why", why=explanation.why_flagged, reference=issue.expected_reference)
+        actions = t_list("explain.expectation.iban_actions")
     else:
-        why = (
-            f"Listed as an expected change ({issue.expected_reference}) and the applied value matches, "
-            f"so the severity was lowered to info. Without the expectation: {explanation.why_flagged}"
+        why = t(
+            "explain.expectation.matched_why",
+            reference=issue.expected_reference,
+            why=explanation.why_flagged,
         )
-        actions = ["No action needed unless the approval record itself is wrong."]
+        actions = t_list("explain.expectation.matched_actions")
     return explanation.model_copy(update={"why_flagged": why, "suggested_actions": actions})
 
 
 def _with_expectation_mismatch(explanation: Explanation, issue: Issue) -> Explanation:
-    why = (
-        f"{explanation.why_flagged} A change was expected for this field, but to "
-        f"{issue.expected_mismatch}, not to the value that was applied."
-    )
-    actions = [
-        "Compare the applied value with the approval record and find out which one is wrong.",
-        *explanation.suggested_actions,
-    ]
+    why = t("explain.expectation.mismatch_why", why=explanation.why_flagged, expected=issue.expected_mismatch)
+    actions = [t("explain.expectation.mismatch_action"), *explanation.suggested_actions]
     return explanation.model_copy(update={"why_flagged": why, "suggested_actions": actions})
 
 
 def _expected_missing(issue: Issue, rules: Rules) -> Explanation:
     return Explanation(
         what_changed=issue.message,
-        why_flagged=(
-            "The expected changes file lists an approved change for this record that is not "
-            "reflected in the current cycle."
+        why_flagged=t("explain.expected_missing.why"),
+        rule_triggered=t(
+            "explain.expected_missing.rule", severity=rules.expected_changes.missing_severity.value
         ),
-        rule_triggered=(
-            f"expected_changes.missing (severity {rules.expected_changes.missing_severity.value})"
-        ),
-        suggested_actions=[
-            "Check whether the change was applied in the source system after the export was taken.",
-            "Check whether the approval was withdrawn or postponed; update the expected changes file.",
-        ],
+        suggested_actions=t_list("explain.expected_missing.actions"),
     )
 
 
 def _salary_change(issue: Issue, rules: Rules) -> Explanation:
     cfg = rules.salary_change
     change = issue.change_percentage
+    warning, critical = format_plain(cfg.warning_percentage), format_plain(cfg.critical_percentage)
     shown = "" if change is None else format_change(change, (cfg.warning_percentage, cfg.critical_percentage))
     if change is None:
-        why = (
-            "The previous value was zero or missing, so a percentage cannot be computed. "
-            "Any change from an empty baseline is surfaced for a human to confirm."
-        )
+        why = t("explain.salary.why_no_pct")
     elif issue.severity is Severity.CRITICAL:
-        why = f"A {shown}% change exceeds the configured {cfg.critical_percentage:g}% critical threshold."
+        why = t("explain.salary.why_critical", pct=shown, critical=critical)
     elif issue.severity is Severity.WARNING:
-        why = (
-            f"A {shown}% change exceeds the {cfg.warning_percentage:g}% warning threshold "
-            f"but does not exceed the {cfg.critical_percentage:g}% critical threshold."
-        )
+        why = t("explain.salary.why_warning", pct=shown, warning=warning, critical=critical)
     else:
-        why = f"A {shown}% change is within the {cfg.warning_percentage:g}% tolerance; listed for completeness."
+        why = t("explain.salary.why_info", pct=shown, warning=warning)
 
-    actions = (
-        ["No action required unless the change is unexpected for this employee."]
-        if issue.severity is Severity.INFO
-        else [
-            "Verify whether a contractual change was approved and by whom.",
-            "Verify the effective date of the change.",
-            "Determine whether the change is permanent or a one-off adjustment.",
-        ]
-    )
+    actions = t_list("explain.salary.actions_info" if issue.severity is Severity.INFO else "explain.salary.actions")
     return Explanation(
         what_changed=issue.message,
         why_flagged=why,
-        rule_triggered=(
-            f"salary_change (warning above {cfg.warning_percentage:g}%, "
-            f"critical above {cfg.critical_percentage:g}%)"
-        ),
+        rule_triggered=t("explain.salary.rule", warning=warning, critical=critical),
         suggested_actions=actions,
     )
 
@@ -150,40 +120,27 @@ def _iban_change(issue: Issue, rules: Rules) -> Explanation:
     cfg = rules.iban_change
     return Explanation(
         what_changed=issue.message,
-        why_flagged=(
-            "Bank details are a sensitive field. The engine treats every IBAN change as "
-            f"{cfg.severity.value} and never decides on its own whether it is legitimate."
-        ),
-        rule_triggered=f"iban_change (severity {cfg.severity.value}, requires review: {cfg.requires_review})",
-        suggested_actions=[
-            "Confirm the change request came through the approved channel and matches a signed instruction.",
-            "Verify the account holder of the new IBAN is the employee.",
-            "Check whether the previous IBAN was used in the last cycle and whether a payment is pending.",
-        ],
+        why_flagged=t("explain.iban.why", severity=cfg.severity.value),
+        rule_triggered=t("explain.iban.rule", severity=cfg.severity.value, review=cfg.requires_review),
+        suggested_actions=t_list("explain.iban.actions"),
     )
 
 
 def _new_record(issue: Issue, rules: Rules) -> Explanation:
     return Explanation(
         what_changed=issue.message,
-        why_flagged="The employee_id does not exist in the previous cycle.",
-        rule_triggered=f"lifecycle.new_record (severity {rules.lifecycle.new_record.severity.value})",
-        suggested_actions=[
-            "Confirm onboarding is complete in the source system.",
-            "Check the record is not an existing employee re-entered under a new ID.",
-        ],
+        why_flagged=t("explain.new.why"),
+        rule_triggered=t("explain.new.rule", severity=rules.lifecycle.new_record.severity.value),
+        suggested_actions=t_list("explain.new.actions"),
     )
 
 
 def _removed_record(issue: Issue, rules: Rules) -> Explanation:
     return Explanation(
         what_changed=issue.message,
-        why_flagged="The employee_id exists in the previous cycle but not in the current export.",
-        rule_triggered=f"lifecycle.removed_record (severity {rules.lifecycle.removed_record.severity.value})",
-        suggested_actions=[
-            "Confirm the leaver was processed and an end date was recorded in the source system.",
-            "Check whether the record was dropped by an export filter rather than a real exit.",
-        ],
+        why_flagged=t("explain.removed.why"),
+        rule_triggered=t("explain.removed.rule", severity=rules.lifecycle.removed_record.severity.value),
+        suggested_actions=t_list("explain.removed.actions"),
     )
 
 
@@ -191,36 +148,20 @@ def _date_change(issue: Issue, rules: Rules) -> Explanation:
     outcome = getattr(rules.lifecycle, issue.rule)
     return Explanation(
         what_changed=issue.message,
-        why_flagged="Employment dates drive eligibility and timing; a change is surfaced for confirmation.",
-        rule_triggered=f"lifecycle.{issue.rule} (severity {outcome.severity.value})",
-        suggested_actions=[
-            "Confirm the new date against the signed contract or termination notice.",
-            "Check whether related fields (contract type, hours, salary) should have changed too.",
-        ],
+        why_flagged=t("explain.date.why"),
+        rule_triggered=t("explain.date.rule", rule=issue.rule, severity=outcome.severity.value),
+        suggested_actions=t_list("explain.date.actions"),
     )
 
 
 def _contract_change(issue: Issue, rules: Rules) -> Explanation:
-    outcome = getattr(rules.contract_changes, issue.field or "contract_type")
-    actions = {
-        "contract_type": [
-            "Confirm the contract amendment was signed and its effective date.",
-            "Check that working hours and salary are consistent with the new contract type.",
-        ],
-        "working_hours": [
-            "Confirm the change in hours was agreed and from which date.",
-            "Check whether the salary was adjusted proportionally.",
-        ],
-        "department": [
-            "Confirm the transfer with the receiving manager.",
-            "Check cost-centre or approval mappings that depend on the department.",
-        ],
-    }[issue.field or "contract_type"]
+    field = issue.field or "contract_type"
+    outcome = getattr(rules.contract_changes, field)
     return Explanation(
         what_changed=issue.message,
-        why_flagged=f"{issue.field} differs between the two cycles.",
-        rule_triggered=f"contract_changes.{issue.field} (severity {outcome.severity.value})",
-        suggested_actions=actions,
+        why_flagged=t("explain.contract.why", field=field),
+        rule_triggered=t("explain.contract.rule", field=field, severity=outcome.severity.value),
+        suggested_actions=t_list(f"explain.contract.actions.{field}"),
     )
 
 
@@ -228,21 +169,18 @@ def _duplicate(issue: Issue, rules: Rules) -> Explanation:
     field = issue.field or "employee_id"
     severity = getattr(rules.duplicates, field)
     if field == "employee_id":
-        why = "The record key must be unique; two rows with the same ID cannot be matched reliably."
-        actions = [
-            "Identify which row is authoritative and remove or merge the other at source.",
-            "Check whether the export joined a table that produced multiple rows per employee.",
-        ]
+        why = t("explain.duplicate.key_why")
+        actions = t_list("explain.duplicate.key_actions")
     else:
-        why = f"Two different records share the same {field}, which usually indicates a data-entry or export error."
+        why = t("explain.duplicate.value_why", field=field)
         actions = [
-            f"Check which employee the {field} really belongs to and correct the other record.",
-            "Confirm the two records are not the same person entered twice.",
+            t("explain.duplicate.value_action", field=field),
+            t("explain.duplicate.value_action_2"),
         ]
     return Explanation(
         what_changed=issue.message,
         why_flagged=why,
-        rule_triggered=f"duplicates.{field} (severity {severity.value})",
+        rule_triggered=t("explain.duplicate.rule", field=field, severity=severity.value),
         suggested_actions=actions,
     )
 
@@ -250,24 +188,19 @@ def _duplicate(issue: Issue, rules: Rules) -> Explanation:
 def _missing(issue: Issue, rules: Rules) -> Explanation:
     return Explanation(
         what_changed=issue.message,
-        why_flagged=f"{issue.field} is listed in required_fields; the record cannot be processed without it.",
-        rule_triggered=f"required_fields / missing_data (severity {rules.missing_data.severity.value})",
-        suggested_actions=[
-            "Obtain the missing value from the source system and re-export.",
-            "Decide whether the record can be processed this cycle without it.",
-        ],
+        why_flagged=t("explain.missing.why", field=issue.field),
+        rule_triggered=t("explain.missing.rule", severity=rules.missing_data.severity.value),
+        suggested_actions=t_list("explain.missing.actions"),
     )
 
 
 def _invalid(issue: Issue, rules: Rules) -> Explanation:
-    reasons = {
-        "invalid_number": "The value could not be read as a number.",
-        "invalid_date": f"The value is not a real date in the expected format ({rules.date_format}).",
-        "negative_salary": "A monthly salary cannot be negative.",
-        "end_before_start": "An employment cannot end before it starts.",
-        "malformed_email": "The email address does not follow the expected pattern.",
-        "malformed_row": "The line has a different number of fields than the header, so it could not be read.",
-    }
+    if issue.rule == "invalid_date":
+        why = t("explain.invalid.invalid_date", formats=" / ".join(rules.formats.input_date_formats))
+    elif issue.rule in {"invalid_number", "negative_salary", "end_before_start", "malformed_email", "malformed_row"}:
+        why = t(f"explain.invalid.{issue.rule}")
+    else:
+        why = t("explain.invalid.fallback")
     severity = (
         rules.invalid_values.malformed_email_severity
         if issue.rule == "malformed_email"
@@ -275,12 +208,9 @@ def _invalid(issue: Issue, rules: Rules) -> Explanation:
     )
     return Explanation(
         what_changed=issue.message,
-        why_flagged=reasons.get(issue.rule, "The value cannot be right."),
-        rule_triggered=f"invalid_values.{issue.rule} (severity {severity.value})",
-        suggested_actions=[
-            "Correct the value in the source system and re-export.",
-            "Check whether the same error affects other rows of the export.",
-        ],
+        why_flagged=why,
+        rule_triggered=t("explain.invalid.rule", rule=issue.rule, severity=severity.value),
+        suggested_actions=t_list("explain.invalid.actions"),
     )
 
 
@@ -288,15 +218,17 @@ def _bonus(issue: Issue, rules: Rules) -> Explanation:
     cfg = rules.bonus
     return Explanation(
         what_changed=issue.message,
-        why_flagged=(
-            f"Bonuses above {cfg.warning_salary_ratio:.0%} of monthly salary are warnings and above "
-            f"{cfg.critical_salary_ratio:.0%} are critical."
+        why_flagged=t(
+            "explain.bonus.why",
+            warning=f"{cfg.warning_salary_ratio:.0%}",
+            critical=f"{cfg.critical_salary_ratio:.0%}",
         ),
-        rule_triggered=f"bonus (warning ratio {cfg.warning_salary_ratio:g}, critical ratio {cfg.critical_salary_ratio:g})",
-        suggested_actions=[
-            "Confirm the bonus amount was approved for this cycle.",
-            "Check for unit mistakes, for example an annual amount entered as monthly.",
-        ],
+        rule_triggered=t(
+            "explain.bonus.rule",
+            warning_ratio=format_plain(cfg.warning_salary_ratio),
+            critical_ratio=format_plain(cfg.critical_salary_ratio),
+        ),
+        suggested_actions=t_list("explain.bonus.actions"),
     )
 
 
@@ -304,31 +236,34 @@ def _overtime(issue: Issue, rules: Rules) -> Explanation:
     cfg = rules.overtime
     value = issue.current_value if issue.current_value is not None else issue.previous_value
     negative = isinstance(value, (int, float)) and value < cfg.minimum_hours
+    why = (
+        t("explain.overtime.why_below", minimum=format_plain(cfg.minimum_hours))
+        if negative
+        else t(
+            "explain.overtime.why_above",
+            warning=format_value(cfg.warning_hours),
+            critical=format_value(cfg.critical_hours),
+        )
+    )
     return Explanation(
         what_changed=issue.message,
-        why_flagged=(
-            f"Overtime is below the configured minimum of {cfg.minimum_hours:g} hours."
-            if negative
-            else f"Overtime above {format_value(cfg.warning_hours)} hours is a warning and above "
-            f"{format_value(cfg.critical_hours)} hours is critical."
+        why_flagged=why,
+        rule_triggered=t(
+            "explain.overtime.rule",
+            minimum=format_plain(cfg.minimum_hours),
+            warning=format_plain(cfg.warning_hours),
+            critical=format_plain(cfg.critical_hours),
         ),
-        rule_triggered=(
-            f"overtime (minimum {cfg.minimum_hours:g}, warning above {cfg.warning_hours:g}, "
-            f"critical above {cfg.critical_hours:g})"
-        ),
-        suggested_actions=[
-            "Verify the hours against the timesheet or time-tracking system.",
-            "Check for data-entry errors such as a wrong sign or a misplaced digit.",
-        ],
+        suggested_actions=t_list("explain.overtime.actions"),
     )
 
 
 def _generic(issue: Issue, rules: Rules) -> Explanation:
     return Explanation(
         what_changed=issue.message,
-        why_flagged=f"Rule {issue.rule} fired with severity {issue.severity.value}.",
+        why_flagged=t("explain.generic.why", rule=issue.rule, severity=issue.severity.value),
         rule_triggered=issue.rule,
-        suggested_actions=["Review the record against the source system."],
+        suggested_actions=t_list("explain.generic.actions"),
     )
 
 
@@ -385,7 +320,7 @@ def explain_with_llm(issue: Issue, rules: Rules, explanation: Explanation | None
     can show it without a stack trace.
     """
     if not llm_available():
-        return "AI explanation unavailable: set ANTHROPIC_API_KEY and install the anthropic package."
+        return t("ai.unavailable_setup")
 
     import anthropic  # imported lazily so the package stays optional
 
@@ -398,23 +333,23 @@ def explain_with_llm(issue: Issue, rules: Rules, explanation: Explanation | None
         response = anthropic.Anthropic().messages.create(
             model=os.environ.get(MODEL_ENV, DEFAULT_MODEL),
             max_tokens=600,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": json.dumps(payload, indent=2)}],
+            system=f"{_SYSTEM_PROMPT}\n- {t('ai.language_instruction')}",
+            messages=[{"role": "user", "content": json.dumps(payload, indent=2, ensure_ascii=False)}],
         )
     except anthropic.AuthenticationError:
-        return "AI explanation unavailable: the API key was rejected."
+        return t("ai.unavailable_key")
     except anthropic.RateLimitError:
-        return "AI explanation unavailable: rate limited, try again in a moment."
+        return t("ai.unavailable_rate")
     except anthropic.APIStatusError as exc:
         logger.warning("LLM explanation failed with status %s", exc.status_code)
-        return f"AI explanation unavailable: the API returned status {exc.status_code}."
+        return t("ai.unavailable_status", status=exc.status_code)
     except anthropic.APIConnectionError:
-        return "AI explanation unavailable: could not reach the API."
+        return t("ai.unavailable_network")
     except Exception:
         logger.warning("AI explanation failed; error details omitted to protect input values")
-        return "AI explanation unavailable: the request failed; the template explanation applies."
+        return t("ai.unavailable_failed")
 
     if response.stop_reason == "refusal":
-        return "AI explanation unavailable for this finding; the template explanation applies."
+        return t("ai.unavailable_refusal")
     text = "".join(block.text for block in response.content if block.type == "text").strip()
-    return redact_iban_text(text) or "AI explanation unavailable: the model returned no text."
+    return redact_iban_text(text) or t("ai.unavailable_empty")
