@@ -145,6 +145,20 @@ def test_formatting_follows_the_configured_separators():
     assert format_for_display("full_time") == "full_time"
 
 
+def test_timestamps_are_shown_as_local_date_and_time():
+    from datetime import datetime
+
+    from src.utils import format_timestamp
+
+    stored = "2026-09-28T19:58:04+00:00"
+    local = datetime.fromisoformat(stored).astimezone()
+    assert format_timestamp(stored) == local.strftime("%Y-%m-%d %H:%M")
+    configure_formats(decimal_separator=",", thousands_separator=".", output_date_format="%d/%m/%Y")
+    assert format_timestamp(stored) == local.strftime("%d/%m/%Y %H:%M")
+    assert format_timestamp(None) == ""
+    assert format_timestamp("not a date") == "not a date"
+
+
 def test_no_thousands_separator_is_allowed():
     configure_formats(decimal_separator=",", thousands_separator="")
     assert parse_number("2100,5") == 2100.5

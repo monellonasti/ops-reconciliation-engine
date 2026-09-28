@@ -37,6 +37,7 @@ from src.utils import (
     format_for_display,
     format_percentage,
     format_plain,
+    format_timestamp,
     is_missing,
     normalize_iban,
 )
@@ -557,7 +558,7 @@ def render_review_decision(issue: Issue, history: ReviewHistory | None) -> None:
                 "ui.decision.current",
                 status=issue.review_status.label,
                 who=t("ui.decision.by", reviewer=issue.reviewed_by) if issue.reviewed_by else "",
-                when=issue.reviewed_at,
+                when=format_timestamp(issue.reviewed_at),
                 note=t("ui.decision.note_suffix", note=issue.review_note) if issue.review_note else "",
             )
         )

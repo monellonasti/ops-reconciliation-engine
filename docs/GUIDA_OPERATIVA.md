@@ -76,6 +76,8 @@ Il ciclo successivo riparte dal punto 1 con il file corrente di oggi come
 "precedente". Le decisioni registrate al punto 5 vengono ritrovate
 automaticamente (sezione 5).
 
+![Schermata di avvio: i tre box di caricamento e i due pulsanti](screenshots/01-avvio.png)
+
 ## 3. Come leggere il riepilogo e la coda
 
 ### Il riepilogo
@@ -92,6 +94,8 @@ automaticamente (sezione 5).
 
 Sotto il riepilogo compaiono le note: righe saltate perché malformate,
 ID duplicati esclusi dal confronto, esito delle modifiche attese.
+
+![Riepilogo con le note sull'esecuzione](screenshots/02-riepilogo.png)
 
 ### La coda
 
@@ -114,6 +118,8 @@ I filtri in alto restringono la coda per severità, categoria, revisione
 richiesta, stato e ID. Per impostazione predefinita le segnalazioni già
 accettate sono nascoste: sono lavoro fatto.
 
+![Coda di revisione con i filtri](screenshots/03-coda.png)
+
 ### Il dettaglio
 
 Spuntando una riga si apre il pannello con quattro blocchi: **cosa è
@@ -122,6 +128,8 @@ cambiato**, **perché è stato segnalato** (con la soglia che è scattata),
 del record** mostra tutti i campi nei due cicli con l'indicazione di quali
 sono cambiati; per un ID duplicato mostra tutte le righe candidate, perché
 nessuna viene scelta al posto vostro.
+
+![Dettaglio di una segnalazione con la scheda del record](screenshots/04-dettaglio.png)
 
 ## 4. Catalogo delle segnalazioni
 
@@ -213,6 +221,8 @@ Ogni decisione e ogni annullamento vengono registrati con data e ora in un
 archivio locale (sezione 9). Non esiste una "decisione automatica": lo
 strumento non accetta nulla da solo.
 
+![Decisione registrata su una segnalazione](screenshots/05-decisione.png)
+
 ## 6. Modifiche attese: dire prima cosa è già approvato
 
 La maggior parte delle variazioni legittime è nota prima che arrivi l'export:
@@ -243,6 +253,8 @@ Cosa succede in esecuzione:
   e dice quale valore era atteso. Serve a scoprire un aumento inserito male.
 - **La modifica non risulta**: nasce una segnalazione "approvazione non
   applicata". Serve a scoprire un aumento dimenticato.
+
+![Le tre segnalazioni di una conversione da part-time a full-time approvata, declassate a informativa con il riferimento](screenshots/06-modifiche-attese.png)
 
 Il file deve essere pulito: un campo non ammesso, una riga doppia o un ID
 vuoto bloccano l'esecuzione con un messaggio che indica la riga. È voluto: il
@@ -279,6 +291,8 @@ costa di più.
 
 Un errore di battitura nel file di regole viene segnalato all'avvio con il
 nome della voce sbagliata, invece di essere ignorato.
+
+![La barra laterale riassume le regole in vigore, i formati, lo storico e la privacy](screenshots/07-regole.png)
 
 ## 8. I file in ingresso
 

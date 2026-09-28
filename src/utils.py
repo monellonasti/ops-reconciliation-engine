@@ -231,6 +231,20 @@ def format_change(change: float, thresholds: Iterable[float]) -> str:
     return _localise_separators(compact)
 
 
+def format_timestamp(iso_text: str | None) -> str:
+    """A stored UTC timestamp (``2026-09-28T19:58:04+00:00``) as local date and time
+    in the configured date format, for example ``28/09/2026 21:58``."""
+    if not iso_text:
+        return ""
+    try:
+        moment = datetime.fromisoformat(iso_text)
+    except ValueError:
+        return iso_text
+    if moment.tzinfo is not None:
+        moment = moment.astimezone()
+    return moment.strftime(f"{_formats.output_date_format} %H:%M")
+
+
 def format_for_display(value: Any) -> str:
     """Render a value stored in a finding (float or ISO date string) for the UI."""
     if is_missing(value):
