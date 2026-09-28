@@ -1,5 +1,13 @@
 # Ops Reconciliation Engine — Implementation Audit
 
+> **Scope note (added 2026-09-28).** This audit covers the code as it stood at
+> commit `caf9445` (2026-09-25), when the suite counted 184 tests before
+> remediation and 271 after it. Features added later, the review history,
+> the expected-changes file, and the Italian language, number/date formats
+> and Excel input, are outside its scope and brought the suite to 399 tests
+> at the time of publication. The counts below are therefore historical; the
+> current figure is the one in the README, verified with `python -m pytest`.
+
 Audit date: 2026-09-25. Baseline: commit `95daf51`, with pre-existing untracked `reports/` left untouched. This document records the original implementation before remediation; the final section records subsequent verification. No application changes preceded this audit. Running the existing suite did invoke its demo generator test, which rewrites the fixtures with identical bytes.
 
 ## 1. Executive Summary
