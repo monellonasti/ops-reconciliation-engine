@@ -145,6 +145,9 @@ Per usare i propri file bastano due export con le stesse colonne del demo
 
 ## Per approfondire
 
+- [Guida operativa](docs/GUIDA_OPERATIVA.md): come inserire lo strumento in
+  un ciclo mensile, come leggere e decidere le segnalazioni, cosa si regola
+  senza programmare, dati e privacy. Scritta per chi gestisce il processo.
 - [Documentazione tecnica](docs/TECHNICAL.md) (in inglese): architettura,
   regole, scelte progettuali e cosa è stato deliberatamente lasciato fuori.
 - [`AUDIT.md`](AUDIT.md): revisione del codice, difetti trovati, correzioni e

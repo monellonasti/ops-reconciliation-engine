@@ -11,6 +11,10 @@ engine works conceptually for inventory snapshots, supplier catalogues, CRM
 exports, subscription records or any other dataset that arrives on a cycle
 and has a stable record key.
 
+An Italian guide for the people who run the process, covering the monthly
+workflow, how to read and decide findings, what can be tuned without code and
+how data is handled, is in [GUIDA_OPERATIVA.md](GUIDA_OPERATIVA.md).
+
 ![Review queue](screenshot-dashboard.png)
 
 ![Issue detail](screenshot-detail.png)
