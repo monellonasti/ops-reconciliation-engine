@@ -105,6 +105,37 @@ def test_reset_from_demo_link_does_not_reload_demo():
     assert "demo" not in at.query_params
 
 
+def test_demo_link_loads_once_per_session(monkeypatch):
+    """After the link has done its job, a cleared result (failed run, changed rules) must
+    stay cleared with its message instead of silently turning back into the demo."""
+    from src import config
+
+    at = AppTest.from_file(APP_PATH, default_timeout=60)
+    at.query_params["demo"] = "1"
+    at.run()
+    assert at.metric
+    monkeypatch.setattr(config, "load_rules", lambda: config.Rules(
+        salary_change={"warning_percentage": 5, "critical_percentage": 10}
+    ))
+    at.run()
+    assert any("Rules changed" in info.value for info in at.info)
+
+    at.run()  # any later interaction
+
+    assert not at.exception and at.metric == []
+
+
+def test_unusable_history_file_does_not_stop_the_tool(isolated_history):
+    isolated_history.path.write_bytes(b"not a database" * 100)
+
+    at = click_button(run_app(), "Load demo dataset")
+
+    assert not at.exception
+    assert any("could not be read or written" in warning.value for warning in at.warning)
+    metrics = {metric.label: str(metric.value) for metric in at.metric}
+    assert metrics["Records processed"] == "203"
+
+
 def test_filters_and_no_matches_state():
     at = click_button(run_app(), "Load demo dataset")
     at.multiselect[0].set_value([Severity.CRITICAL]).run()
@@ -165,6 +196,34 @@ def test_run_pipeline_hides_unexpected_errors_behind_a_plain_message(fake_sessio
 
     assert "secret internal detail" not in fake_session_state["error"]
     assert "Something went wrong" in fake_session_state["error"]
+
+
+def test_unexpected_error_while_reading_a_file_is_a_plain_message(fake_session_state, rules, monkeypatch, caplog):
+    """Library errors can quote the offending cell; neither the page nor the log may show it."""
+    def explode(*_args, **_kwargs):
+        raise ValueError("invalid literal for int(): 'IT60X0542811101000000123456'")
+
+    monkeypatch.setattr(app_module, "load_dataset", explode)
+
+    app_module.run_pipeline(b"x", b"x", "prev.csv", "curr.csv", rules)
+
+    assert "Something went wrong" in fake_session_state["error"]
+    assert "0542811101000000123456" not in fake_session_state["error"] + caplog.text
+    assert "result" not in fake_session_state
+
+
+def test_decisions_saved_in_another_session_reach_this_one(fake_session_state, isolated_history, rules):
+    app_module.run_pipeline(app_module.DEMO_PREVIOUS, app_module.DEMO_CURRENT, "p", "c", rules, isolated_history)
+    issue = next(i for i in fake_session_state["result"].issues if i.employee_id == "EMP-00125")
+    app_module.sync_decisions(isolated_history)  # nothing new: the result is kept as is
+    unchanged = fake_session_state["result"]
+
+    ReviewHistory(isolated_history.path).record(issue, ReviewStatus.ACCEPTED, reviewer="Colleague")
+    app_module.sync_decisions(isolated_history)
+
+    assert fake_session_state["result"] is not unchanged
+    updated = next(i for i in fake_session_state["result"].issues if i.employee_id == "EMP-00125")
+    assert updated.review_status is ReviewStatus.ACCEPTED and updated.reviewed_by == "Colleague"
 
 
 def test_run_pipeline_stores_result_and_datasets(fake_session_state, rules):
@@ -323,3 +382,20 @@ def test_italian_rules_profile_drives_the_ui(monkeypatch):
     table = next(e.value for e in at.dataframe if "ID dipendente" in e.value.columns)
     assert any(cell.startswith("corrisponde:") for cell in table["Attesa"])
     assert any("/" in cell for cell in table["Corrente"] if cell)  # dates shown as GG/MM/AAAA
+
+
+def test_exports_are_built_once_per_result(fake_session_state, isolated_history, rules, monkeypatch):
+    app_module.run_pipeline(app_module.DEMO_PREVIOUS, app_module.DEMO_CURRENT, "p", "c", rules, isolated_history)
+    result = fake_session_state["result"]
+    builds = []
+    real = app_module.full_report_csv
+    monkeypatch.setattr(app_module, "full_report_csv", lambda r: builds.append(r) or real(r))
+
+    first = app_module.export_files(result)
+    again = app_module.export_files(result)  # a click in the table: same result
+    issue = next(i for i in result.issues if i.employee_id == "EMP-00125")
+    app_module.save_decision(issue, isolated_history, ReviewStatus.ACCEPTED, "", "")
+    updated = app_module.export_files(fake_session_state["result"])
+
+    assert first == again and len(builds) == 2
+    assert b"accepted" in updated[0] and b"accepted" not in first[0]

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +19,7 @@ from src.config import REPO_ROOT, Rules, RulesConfigError, default_rules_path, l
 from src.engine import apply_history, apply_presentation, run_reconciliation
 from src.expectations import EXPECTABLE_FIELDS, ExpectedChanges, load_expected_changes
 from src.explain import Explanation, explain_issue, explain_with_llm, llm_available
-from src.history import ReviewHistory, fingerprint, open_history
+from src.history import HistoryError, ReviewHistory, fingerprint, open_history
 from src.i18n import available_languages, t
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
 from src.models import (
@@ -51,7 +52,11 @@ UPLOAD_TYPES = ["csv", "xlsx"]
 LANGUAGE_NAMES = {"en": "English", "it": "Italiano"}
 SEVERITY_MARK = {Severity.CRITICAL: "🔴", Severity.WARNING: "🟠", Severity.INFO: "🔵"}
 
-RUN_STATE_KEYS = ("result", "previous", "current", "sources", "run_rules", "expected", "expected_obj")
+RUN_STATE_KEYS = (
+    "result", "previous", "current", "sources", "run_rules", "expected", "expected_obj", "history_version",
+    "exports",
+)
+T = TypeVar("T")
 
 
 def severity_label(severity: Severity) -> str:
@@ -67,9 +72,10 @@ def main() -> None:
     st.title("Ops Reconciliation Engine")
     st.caption(t("ui.subtitle"))
 
-    history = open_history(rules)
+    history, history_count, history_problem = usable_history(rules)
     refresh_if_rules_changed(rules, history)
-    render_sidebar(rules, history)
+    sync_decisions(history)
+    render_sidebar(rules, history, history_count, history_problem)
     render_inputs(rules, history)
 
     if st.session_state.get("error"):
@@ -92,7 +98,7 @@ def main() -> None:
 
     render_summary(result)
     selected = render_review_table(result)
-    render_detail_panel(selected, rules, history)
+    render_detail_panel(selected, rules, history, history_problem)
     render_exports(result)
 
 
@@ -115,6 +121,37 @@ def with_session_language(rules: Rules) -> Rules:
     return rules
 
 
+def usable_history(rules: Rules) -> tuple[ReviewHistory | None, int, str | None]:
+    """The configured history and its decision count, or why it cannot be used right now.
+
+    A damaged or locked file must not take the whole tool down: reconciliation keeps
+    working and the problem is shown where decisions would be.
+    """
+    history = open_history(rules)
+    if history is None:
+        return None, 0, None
+    try:
+        return history, history.count(), None
+    except HistoryError as exc:
+        return None, 0, str(exc)
+
+
+def sync_decisions(history: ReviewHistory | None) -> None:
+    """Attach decisions saved since the result was built, in this session or another one,
+    so the queue never shows a stale status next to the decision form."""
+    result: ReconciliationResult | None = st.session_state.get("result")
+    if result is None or history is None:
+        return
+    version = history.version()
+    if version == st.session_state.get("history_version"):
+        return
+    try:
+        st.session_state["result"] = apply_history(result, history)
+    except HistoryError:
+        return  # reported in the sidebar on the next render
+    st.session_state["history_version"] = version
+
+
 def refresh_if_rules_changed(rules: Rules, history: ReviewHistory | None) -> None:
     """A result computed under other rules is stale. A language-only change is re-run
     silently from the loaded files; any other change asks for a new run."""
@@ -123,6 +160,7 @@ def refresh_if_rules_changed(rules: Rules, history: ReviewHistory | None) -> Non
     previous_rules: Rules = st.session_state["run_rules"]
     only_language = previous_rules.model_copy(update={"language": rules.language}) == rules
     if only_language and "previous" in st.session_state and "current" in st.session_state:
+        st.session_state["history_version"] = history.version() if history is not None else None
         result = run_reconciliation(
             st.session_state["previous"],
             st.session_state["current"],
@@ -138,7 +176,9 @@ def refresh_if_rules_changed(rules: Rules, history: ReviewHistory | None) -> Non
     st.info(t("ui.rules_changed"))
 
 
-def render_sidebar(rules: Rules, history: ReviewHistory | None) -> None:
+def render_sidebar(
+    rules: Rules, history: ReviewHistory | None, history_count: int = 0, history_problem: str | None = None
+) -> None:
     with st.sidebar:
         languages = available_languages()
         st.selectbox(
@@ -177,22 +217,24 @@ def render_sidebar(rules: Rules, history: ReviewHistory | None) -> None:
         )
 
         st.subheader(t("ui.sidebar.history"))
-        if history is None:
+        if history_problem:
+            st.warning(history_problem)
+        elif history is None:
             st.caption(t("ui.sidebar.history_disabled"))
         else:
             st.caption(
-                t("ui.sidebar.history_enabled", path=history_display_path(history), count=history.count())
+                t("ui.sidebar.history_enabled", path=history_display_path(history), count=history_count)
             )
 
         st.subheader(t("ui.sidebar.privacy"))
         st.caption(t("ui.sidebar.privacy_text"))
 
         if st.button(t("ui.sidebar.reset"), width="stretch"):
-            for key in (
-                *RUN_STATE_KEYS, "error", "ai_explanations",
-                "upload_previous", "upload_current", "upload_expected",
-            ):
+            for key in (*RUN_STATE_KEYS, "error", "ai_explanations"):
                 st.session_state.pop(key, None)
+            # Dropping an uploader's state does not empty it in the browser, which kept showing
+            # the old files next to a disabled Run button. New keys give new, empty uploaders.
+            st.session_state["upload_generation"] = st.session_state.get("upload_generation", 0) + 1
             st.query_params.pop("demo", None)
             st.rerun()
 
@@ -211,12 +253,13 @@ def rules_display_path() -> str:
 def render_inputs(rules: Rules, history: ReviewHistory | None) -> None:
     st.subheader(t("ui.inputs.title"))
     left, right = st.columns(2)
-    previous_file = left.file_uploader(t("ui.inputs.previous"), type=UPLOAD_TYPES, key="upload_previous")
-    current_file = right.file_uploader(t("ui.inputs.current"), type=UPLOAD_TYPES, key="upload_current")
+    generation = st.session_state.get("upload_generation", 0)
+    previous_file = left.file_uploader(t("ui.inputs.previous"), type=UPLOAD_TYPES, key=f"upload_previous_{generation}")
+    current_file = right.file_uploader(t("ui.inputs.current"), type=UPLOAD_TYPES, key=f"upload_current_{generation}")
     expected_file = st.file_uploader(
         t("ui.inputs.expected"),
         type=UPLOAD_TYPES,
-        key="upload_expected",
+        key=f"upload_expected_{generation}",
         help=t("ui.inputs.expected_help", fields=", ".join(EXPECTABLE_FIELDS)),
     )
 
@@ -230,30 +273,35 @@ def render_inputs(rules: Rules, history: ReviewHistory | None) -> None:
     demo_clicked = demo_col.button(t("ui.inputs.demo"), width="stretch")
 
     # Opening the app with ?demo=1 loads the demo straight away (handy for sharing a link).
-    auto_demo = "demo" in st.query_params and "result" not in st.session_state
+    # Once per session: a later failed run must show its error, not be replaced by the demo.
+    auto_demo = "demo" in st.query_params and not st.session_state.get("demo_link_used")
+    if auto_demo:
+        st.session_state["demo_link_used"] = True
 
     if run_clicked and previous_file is not None and current_file is not None:
-        run_pipeline(
-            previous_file,
-            current_file,
-            previous_file.name,
-            current_file.name,
-            rules,
-            history,
-            expected_source=expected_file,
-            expected_label=expected_file.name if expected_file is not None else None,
-        )
+        with st.spinner(t("ui.inputs.running")):  # large exports take several seconds
+            run_pipeline(
+                previous_file,
+                current_file,
+                previous_file.name,
+                current_file.name,
+                rules,
+                history,
+                expected_source=expected_file,
+                expected_label=expected_file.name if expected_file is not None else None,
+            )
     elif demo_clicked or auto_demo:
-        run_pipeline(
-            DEMO_PREVIOUS,
-            DEMO_CURRENT,
-            DEMO_PREVIOUS.name,
-            DEMO_CURRENT.name,
-            rules,
-            history,
-            expected_source=DEMO_EXPECTED,
-            expected_label=DEMO_EXPECTED.name,
-        )
+        with st.spinner(t("ui.inputs.running")):
+            run_pipeline(
+                DEMO_PREVIOUS,
+                DEMO_CURRENT,
+                DEMO_PREVIOUS.name,
+                DEMO_CURRENT.name,
+                rules,
+                history,
+                expected_source=DEMO_EXPECTED,
+                expected_label=DEMO_EXPECTED.name,
+            )
 
 
 def run_pipeline(
@@ -272,26 +320,25 @@ def run_pipeline(
         st.session_state.pop(key, None)
     apply_presentation(rules)
     try:
-        previous = load_dataset(previous_source, name="previous", rules=rules)
-    except DatasetLoadError as exc:
-        st.session_state["error"] = t("ui.error.previous", name=previous_label, error=exc)
+        previous = read_input(
+            lambda: load_dataset(previous_source, name="previous", rules=rules), "ui.error.previous", previous_label
+        )
+        current = read_input(
+            lambda: load_dataset(current_source, name="current", rules=rules), "ui.error.current", current_label
+        )
+        expected: ExpectedChanges | None = None
+        if expected_source is not None:
+            expected = read_input(
+                lambda: load_expected_changes(expected_source), "ui.error.expected", expected_label
+            )
+    except InputError as problem:
+        st.session_state["error"] = str(problem)
         return
-    try:
-        current = load_dataset(current_source, name="current", rules=rules)
-    except DatasetLoadError as exc:
-        st.session_state["error"] = t("ui.error.current", name=current_label, error=exc)
-        return
-    expected: ExpectedChanges | None = None
-    if expected_source is not None:
-        try:
-            expected = load_expected_changes(expected_source)
-        except DatasetLoadError as exc:
-            st.session_state["error"] = t("ui.error.expected", name=expected_label, error=exc)
-            return
+    history_version = history.version() if history is not None else None
     try:
         result = run_reconciliation(previous, current, rules, history, expected)
-    except Exception:
-        logger.error("Unexpected error during reconciliation; input values omitted")
+    except Exception as exc:
+        logger.error("Unexpected %s during reconciliation; input values omitted", type(exc).__name__)
         st.session_state["error"] = t("ui.error.unexpected")
         return
 
@@ -303,7 +350,27 @@ def run_pipeline(
         run_rules=rules.model_copy(deep=True),
         expected=(expected_label, len(expected)) if expected is not None else None,
         expected_obj=expected,
+        history_version=history_version,
     )
+
+
+class InputError(Exception):
+    """An uploaded file could not be used; the message is ready for the operator."""
+
+
+def read_input(load: Callable[[], T], error_key: str, label: str | None) -> T:
+    """Load one uploaded file; any failure becomes an :class:`InputError` for the operator.
+
+    Problems with the file are explained. Anything else gets a generic message, because
+    a library error can quote the cell it choked on (an IBAN, a salary).
+    """
+    try:
+        return load()
+    except DatasetLoadError as exc:
+        raise InputError(t(error_key, name=label, error=exc)) from exc
+    except Exception as exc:
+        logger.error("Unexpected %s while reading an input file; values omitted", type(exc).__name__)
+        raise InputError(t("ui.error.unexpected")) from None
 
 
 # --- results -----------------------------------------------------------------------------
@@ -440,8 +507,14 @@ def expected_label(issue: Issue) -> str:
     return ""
 
 
-def render_detail_panel(issue: Issue | None, rules: Rules, history: ReviewHistory | None) -> None:
+def render_detail_panel(
+    issue: Issue | None, rules: Rules, history: ReviewHistory | None, history_problem: str | None = None
+) -> None:
     st.subheader(t("ui.detail.title"))
+    feedback = st.session_state.pop("decision_feedback", None)
+    if feedback:
+        # Shown here because an accepted finding leaves the filtered table (and its selection).
+        st.success(feedback)
     if issue is None:
         st.caption(t("ui.detail.hint"))
         return
@@ -476,7 +549,7 @@ def render_detail_panel(issue: Issue | None, rules: Rules, history: ReviewHistor
             with st.expander(t("ui.detail.snapshot")):
                 st.dataframe(snapshot, hide_index=True, width="stretch")
 
-        render_review_decision(issue, history)
+        render_review_decision(issue, history, history_problem)
         render_ai_explanation(issue, rules, explanation)
 
 
@@ -545,11 +618,13 @@ def history_display_path(history: ReviewHistory) -> str:
         return str(history.path)
 
 
-def render_review_decision(issue: Issue, history: ReviewHistory | None) -> None:
+def render_review_decision(
+    issue: Issue, history: ReviewHistory | None, history_problem: str | None = None
+) -> None:
     """Let the operator record what they decided; the engine never does this itself."""
     st.markdown(t("ui.decision.title"))
     if history is None:
-        st.caption(t("ui.decision.disabled"))
+        st.caption(history_problem or t("ui.decision.disabled"))
         return
 
     if issue.review_status is not ReviewStatus.OPEN:
@@ -575,19 +650,31 @@ def render_review_decision(issue: Issue, history: ReviewHistory | None) -> None:
     note = note_col.text_input(t("ui.decision.note"), value=issue.review_note or "", key=f"note_{key}")
     reviewer = reviewer_col.text_input(t("ui.decision.reviewer"), key="reviewer")
     if st.button(t("ui.decision.save"), key=f"save_{key}"):
-        save_decision(issue, history, status, note, reviewer)
-        st.rerun()
+        try:
+            save_decision(issue, history, status, note, reviewer)
+        except HistoryError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state["decision_feedback"] = t(
+                "ui.decision.saved", record=issue.record_label, status=status.label
+            )
+            st.rerun()
     st.caption(t("ui.decision.help"))
 
 
 def save_decision(
     issue: Issue, history: ReviewHistory, status: ReviewStatus, note: str, reviewer: str
 ) -> None:
-    """Persist one decision and refresh the result so the table and summary reflect it."""
+    """Persist one decision and refresh the result so the table and summary reflect it.
+
+    Raises :class:`HistoryError` when the history file cannot be written or read back.
+    """
     history.record(issue, status, note=note, reviewer=reviewer)
     result: ReconciliationResult | None = st.session_state.get("result")
     if result is not None:
+        version = history.version()  # read first: a save landing meanwhile is picked up next render
         st.session_state["result"] = apply_history(result, history)
+        st.session_state["history_version"] = version
 
 
 def render_ai_explanation(issue: Issue, rules: Rules, explanation: Explanation) -> None:
@@ -606,19 +693,29 @@ def render_ai_explanation(issue: Issue, rules: Rules, explanation: Explanation) 
         st.caption(t("ui.ai.disclaimer"))
 
 
+def export_files(result: ReconciliationResult) -> tuple[bytes, bytes]:
+    """Both CSV exports, built once per result instead of on every click in the table."""
+    cached = st.session_state.get("exports")
+    if cached is None or cached[0] is not result:
+        cached = (result, full_report_csv(result), review_queue_csv(result))
+        st.session_state["exports"] = cached
+    return cached[1], cached[2]
+
+
 def render_exports(result: ReconciliationResult) -> None:
     st.subheader(t("ui.export.title"))
+    full_report, review_queue = export_files(result)
     left, right, _ = st.columns([1, 1, 3])
     left.download_button(
         t("ui.export.full"),
-        data=full_report_csv(result),
+        data=full_report,
         file_name="reconciliation_report.csv",
         mime="text/csv",
         width="stretch",
     )
     right.download_button(
         t("ui.export.queue"),
-        data=review_queue_csv(result),
+        data=review_queue,
         file_name="review_required.csv",
         mime="text/csv",
         width="stretch",

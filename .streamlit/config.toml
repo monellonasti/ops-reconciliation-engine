@@ -1,2 +1,7 @@
 [browser]
 gatherUsageStats = false
+
+[client]
+# An unexpected error shows its type in the browser; the message and traceback,
+# which can quote a value from the uploaded files, go to the server console only.
+showErrorDetails = "type"
