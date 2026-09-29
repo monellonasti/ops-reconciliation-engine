@@ -104,6 +104,56 @@ def test_broken_xlsx_gives_a_clean_error(rules):
         load_dataset(b"PK\x03\x04not really a workbook", name="current", rules=rules)
 
 
+def damaged_sheet_bytes() -> bytes:
+    """A workbook that opens fine but whose sheet declares an IBAN as a number cell."""
+    import zipfile
+
+    original = zipfile.ZipFile(io.BytesIO(workbook_bytes([typed_row()])))
+    damaged = io.BytesIO()
+    with zipfile.ZipFile(damaged, "w") as target:
+        for item in original.infolist():
+            data = original.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                bad_cell = b'<row r="3"><c r="A3" t="n"><v>IT60X0542811101000000123456</v></c></row>'
+                data = data.replace(b"</sheetData>", bad_cell + b"</sheetData>")
+            target.writestr(item, data)
+    return damaged.getvalue()
+
+
+def test_damaged_sheet_gives_a_clean_error_without_cell_values(rules):
+    """openpyxl's own message quotes the cell; the operator must only see ours."""
+    with pytest.raises(DatasetLoadError) as caught:
+        load_dataset(damaged_sheet_bytes(), name="current", rules=rules)
+
+    assert "Excel file could not be read" in str(caught.value)
+    assert "0542811101000000123456" not in str(caught.value)
+
+
+def test_damaged_sheet_in_the_app_shows_the_file_error(monkeypatch, rules):
+    import app
+
+    state: dict = {}
+    monkeypatch.setattr(app.st, "session_state", state)
+
+    app.run_pipeline(workbook_bytes([typed_row()]), damaged_sheet_bytes(), "prev.xlsx", "curr.xlsx", rules)
+
+    assert state["error"].startswith("Current cycle (curr.xlsx)")
+    assert "0542811101000000123456" not in state["error"] and "result" not in state
+
+
+def test_numeric_employee_ids_become_text_keys(rules):
+    """Excel stores 125 as a number; the record key is the text "125" everywhere."""
+    previous = csv_bytes([employee(employee_id="125")])
+    current = workbook_bytes([typed_row(employee_id=125, monthly_salary=3000), typed_row(employee_id=126.0, email="b@example.com")])
+
+    loaded = load_dataset(current, name="current", rules=rules)
+    result = reconcile_sources(previous, current, rules)
+
+    assert list(loaded.frame["employee_id"]) == ["125", "126"]
+    assert {(issue.employee_id, issue.rule) for issue in result.issues} >= {("125", "salary_change"), ("126", "new_record")}
+    assert not any(issue.rule == "removed_record" for issue in result.issues)
+
+
 def test_header_only_workbook_is_rejected(rules):
     with pytest.raises(DatasetLoadError, match="no data rows"):
         load_dataset(workbook_bytes([]), name="current", rules=rules)

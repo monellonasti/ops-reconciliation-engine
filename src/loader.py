@@ -118,6 +118,7 @@ def load_dataset(source: Source, *, name: Literal["previous", "current"], rules:
     frame[SOURCE_ROW] = [line for line, _ in table.rows]
 
     frame, column_notes = _align_columns(frame, rules)
+    frame[KEY_FIELD] = frame[KEY_FIELD].map(_key_text)
     notes = table.notes + column_notes
 
     logger.info("Loaded %s dataset: %d rows, %d skipped", name, len(frame), len(issues))
@@ -172,7 +173,9 @@ def _detect_delimiter(text: str) -> str:
 def _parse_csv(
     text: str, delimiter: str
 ) -> tuple[list[str], list[tuple[int, list[str]]], list[tuple[int, int]]]:
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter, strict=True)
+    # newline="" hands line endings to the csv module untouched, so CR-only files
+    # (older Mac exports) are split into rows like CRLF and LF files.
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
     try:
         header_cells = next(reader)
     except StopIteration as exc:
@@ -235,6 +238,12 @@ def _read_excel(raw: bytes) -> tuple[list[str], list[tuple[int, list[Cell]]], li
             if all(value is None for value in values):
                 continue
             rows.append((index, values))
+    except DatasetLoadError:
+        raise
+    except Exception as exc:
+        # A damaged sheet fails while rows are read, and the library's message can
+        # quote the offending cell (an IBAN, a salary): never pass it on.
+        raise DatasetLoadError(t("loader.excel_error")) from exc
     finally:
         workbook.close()
 
@@ -275,6 +284,16 @@ def _check_header(header: list[str]) -> None:
         seen.add(name)
     if duplicates:
         raise DatasetLoadError(t("loader.duplicate_columns", names=", ".join(duplicates)))
+
+
+def _key_text(value: Cell) -> str | None:
+    """Record keys are identifiers: an Excel number 125 is the ID "125", not 125 or 125.0."""
+    if value is None:
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    return text or None
 
 
 def _clean_cell(value: Any) -> str | None:

@@ -89,6 +89,17 @@ def test_export_frame_has_the_documented_columns():
     assert frame.loc[0, "change_percentage"] == 20.0
 
 
+def test_exported_row_numbers_are_whole_numbers():
+    """Row numbers point back to a line in the source file: 175, not 175.0."""
+    from src.reporting import to_csv_bytes
+
+    frame = issues_to_frame([issue(row_number=175, dataset="current"), issue(row_number=None)])
+    lines = to_csv_bytes(frame).decode("utf-8-sig").splitlines()
+
+    assert lines[1].split(",")[:2] == ["EMP-00001", "175"]
+    assert lines[2].split(",")[:2] == ["EMP-00001", ""]
+
+
 def test_export_frame_is_empty_but_well_formed_without_issues():
     frame = issues_to_frame([])
 

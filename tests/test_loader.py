@@ -101,6 +101,24 @@ def test_non_utf8_file_is_decoded_with_a_note(rules):
     assert any("cp1252" in note for note in loaded.notes)
 
 
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n", b"\r"], ids=["LF", "CRLF", "CR"])
+def test_every_line_ending_gives_the_same_rows_and_line_numbers(rules, newline):
+    """CR-only files come from older Mac spreadsheet exports; they used to fail to parse."""
+    lines = [
+        b"employee_id,first_name,last_name,contract_type,monthly_salary",
+        b"EMP-1,Ada,Rossi,full_time,2000",
+        b'EMP-2,"Bea',  # a quoted field spanning two physical lines
+        b'Maria",Bianchi,full_time,2000',
+        b"EMP-3,Cyrus",
+    ]
+    loaded = load_dataset(newline.join(lines) + newline, name="current", rules=rules)
+
+    assert list(loaded.frame["employee_id"]) == ["EMP-1", "EMP-2"]
+    assert loaded.frame.loc[1, "first_name"].replace("\r\n", "\n").replace("\r", "\n") == "Bea\nMaria"
+    assert list(loaded.frame[SOURCE_ROW]) == [2, 4]
+    assert [issue.row_number for issue in loaded.issues] == [5]
+
+
 def test_utf8_bom_is_ignored(rules):
     raw = "﻿employee_id,first_name,last_name,contract_type,monthly_salary\nEMP-1,Ada,Rossi,full_time,2000\n"
 

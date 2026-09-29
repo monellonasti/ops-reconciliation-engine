@@ -9,22 +9,31 @@ shown as such.
 Storage is a single SQLite file. Nothing is written until an operator records
 a decision; reading from a file that does not exist yields no decisions and
 does not create it. The engine never changes a decision on its own.
+
+A file that cannot be used (damaged, locked, not writable) raises
+:class:`HistoryError` with a message for the operator; callers show it and
+carry on without decisions instead of failing the whole run.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from src.config import REPO_ROOT, Rules
+from src.i18n import en, t
 from src.models import Issue, ReviewStatus
 from src.utils import normalize_text, redact_iban_text
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS decisions (
@@ -55,6 +64,10 @@ CREATE TABLE IF NOT EXISTS decision_log (
 _LOOKUP_CHUNK = 500
 
 
+class HistoryError(Exception):
+    """The history file cannot be read or written. The message is written for the operator."""
+
+
 class Decision(BaseModel):
     status: ReviewStatus
     note: str | None = None
@@ -63,9 +76,23 @@ class Decision(BaseModel):
 
 
 def fingerprint(issue: Issue) -> str:
-    """Stable identity of a finding across runs: what was flagged and the values shown."""
-    parts = [issue.record_label, issue.rule, issue.field, issue.previous_value, issue.current_value]
+    """Stable identity of a finding across runs: what was flagged and the values shown.
+
+    The record part does not depend on the interface language, so a decision
+    saved in one language still applies after switching to another.
+    """
+    parts = [_record_identity(issue), issue.rule, issue.field, issue.previous_value, issue.current_value]
     return hashlib.sha256(json.dumps(parts, default=str).encode("utf-8")).hexdigest()
+
+
+def _record_identity(issue: Issue) -> str:
+    # Rows without an ID use the English label, which is what fingerprints were built
+    # from before other languages existed: decisions saved back then stay attached.
+    if issue.employee_id:
+        return issue.employee_id
+    if issue.row_number is not None:
+        return str(en.MESSAGES["record.row"]).format(line=issue.row_number)
+    return str(en.MESSAGES["record.unknown"])
 
 
 class ReviewHistory:
@@ -80,7 +107,7 @@ class ReviewHistory:
             return {}
         prints = sorted({fingerprint(issue) for issue in issues})
         found: dict[str, Decision] = {}
-        with closing(self._connect()) as connection:
+        with self._usable(), closing(self._connect()) as connection:
             for start in range(0, len(prints), _LOOKUP_CHUNK):
                 chunk = prints[start : start + _LOOKUP_CHUNK]
                 placeholders = ",".join("?" for _ in chunk)
@@ -119,8 +146,16 @@ class ReviewHistory:
     def count(self) -> int:
         if not self.path.exists():
             return 0
-        with closing(self._connect()) as connection:
+        with self._usable(), closing(self._connect()) as connection:
             return connection.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+
+    def version(self) -> tuple[int, int] | None:
+        """Changes whenever a decision is saved, from this session or any other."""
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
 
     # --- writing --------------------------------------------------------------
 
@@ -139,7 +174,7 @@ class ReviewHistory:
             decided_at=_now(),
         )
         key = fingerprint(issue)
-        with closing(self._connect(create=True)) as connection, connection:
+        with self._usable(), closing(self._connect(create=True)) as connection, connection:
             connection.execute(
                 "INSERT INTO decisions (fingerprint, record, rule, field, previous_value, current_value,"
                 " status, note, reviewer, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -166,7 +201,7 @@ class ReviewHistory:
         if not self.path.exists():
             return
         key = fingerprint(issue)
-        with closing(self._connect()) as connection, connection:
+        with self._usable(), closing(self._connect()) as connection, connection:
             deleted = connection.execute("DELETE FROM decisions WHERE fingerprint = ?", (key,)).rowcount
             if deleted:
                 cleared = Decision(status=ReviewStatus.OPEN, reviewer=_clean(reviewer), decided_at=_now())
@@ -174,11 +209,28 @@ class ReviewHistory:
 
     # --- internals ------------------------------------------------------------
 
+    @contextmanager
+    def _usable(self) -> Iterator[None]:
+        """Turn storage failures into one operator message. Only the error type is logged."""
+        try:
+            yield
+        except sqlite3.OperationalError as exc:
+            logger.warning("Review history unusable: %s", type(exc).__name__)
+            key = "history.busy" if "locked" in str(exc).lower() else "history.unavailable"
+            raise HistoryError(t(key, path=self.path.name)) from exc
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            logger.warning("Review history unusable: %s", type(exc).__name__)
+            raise HistoryError(t("history.unavailable", path=self.path.name)) from exc
+
     def _connect(self, create: bool = False) -> sqlite3.Connection:
         if create:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path)
-        connection.executescript(_SCHEMA)
+        try:
+            connection.executescript(_SCHEMA)
+        except BaseException:
+            connection.close()  # an open handle would keep the file locked on Windows
+            raise
         return connection
 
     @staticmethod

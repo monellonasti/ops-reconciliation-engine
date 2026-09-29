@@ -27,7 +27,14 @@ logger = logging.getLogger(__name__)
 
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 MODEL_ENV = "OPS_RECON_LLM_MODEL"
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "claude-opus-5-5"
+# The operator is waiting on a spinner: fail fast instead of the SDK's 10-minute default.
+REQUEST_TIMEOUT_SECONDS = 45.0
+MAX_RETRIES = 1
+# Room for the model's (brief, low-effort) reasoning plus the short answer.
+MAX_TOKENS = 4096
+# The operator's own review note and name stay local; only the finding is sent.
+_NOT_SENT = {"review_status", "review_note", "reviewed_by", "reviewed_at"}
 
 
 class Explanation(BaseModel):
@@ -326,13 +333,19 @@ def explain_with_llm(issue: Issue, rules: Rules, explanation: Explanation | None
 
     explanation = explanation or explain_issue(issue, rules)
     payload = {
-        "finding": issue.model_dump(mode="json"),
+        "finding": issue.model_dump(mode="json", exclude=_NOT_SENT),
         "template_explanation": explanation.model_dump(),
     }
     try:
-        response = anthropic.Anthropic().messages.create(
+        client = anthropic.Anthropic(timeout=REQUEST_TIMEOUT_SECONDS, max_retries=MAX_RETRIES)
+        response = client.beta.messages.create(
             model=os.environ.get(MODEL_ENV, DEFAULT_MODEL),
-            max_tokens=600,
+            max_tokens=MAX_TOKENS,
+            # A short rephrasing: low effort keeps latency and reasoning tokens down.
+            output_config={"effort": "low"},
+            # If a safety classifier declines, the API retries on its recommended model.
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
             system=f"{_SYSTEM_PROMPT}\n- {t('ai.language_instruction')}",
             messages=[{"role": "user", "content": json.dumps(payload, indent=2, ensure_ascii=False)}],
         )
@@ -351,5 +364,7 @@ def explain_with_llm(issue: Issue, rules: Rules, explanation: Explanation | None
 
     if response.stop_reason == "refusal":
         return t("ai.unavailable_refusal")
+    if response.stop_reason == "max_tokens":
+        return t("ai.unavailable_truncated")  # a cut-off answer could drop the caveats
     text = "".join(block.text for block in response.content if block.type == "text").strip()
     return redact_iban_text(text) or t("ai.unavailable_empty")

@@ -201,3 +201,94 @@ def test_cli_reports_stored_decisions(tmp_path, capsys):
     assert exit_code == 0
     assert "Records requiring review: 0" in output
     assert "Findings with a stored decision: 1 (1 accepted, 0 need action)" in output
+
+
+# --- unusable files ----------------------------------------------------------------
+
+
+def row_level_run(history: ReviewHistory | None = None, rules: Rules | None = None):
+    """A finding with no employee_id: identified by its source row."""
+    return reconcile_sources(
+        csv_bytes([employee()]),
+        csv_bytes([employee(), employee(employee_id="", email="other@example.com", iban="")]),
+        rules or Rules(),
+        history,
+    )
+
+
+def test_row_level_decisions_survive_a_language_switch(history):
+    row_finding = next(issue for issue in row_level_run().issues if issue.employee_id is None)
+    history.record(row_finding, ReviewStatus.ACCEPTED)
+
+    italian = rules_from_dict({"language": "it"})
+    reopened = next(issue for issue in row_level_run(history, italian).issues if issue.employee_id is None)
+
+    assert reopened.record_label.startswith("riga")
+    assert reopened.review_status is ReviewStatus.ACCEPTED
+
+
+def test_english_fingerprints_of_row_findings_are_unchanged():
+    """Decisions saved before the fingerprint became language-neutral still match."""
+    import hashlib
+    import json
+
+    finding = next(issue for issue in row_level_run().issues if issue.employee_id is None)
+    legacy = [finding.record_label, finding.rule, finding.field, finding.previous_value, finding.current_value]
+
+    assert fingerprint(finding) == hashlib.sha256(json.dumps(legacy, default=str).encode()).hexdigest()
+
+
+@pytest.mark.parametrize("kind", ["not a database", "a folder"])
+def test_unusable_history_file_raises_one_operator_error(tmp_path, kind):
+    from src.history import HistoryError
+
+    path = tmp_path / "history.sqlite"
+    if kind == "a folder":
+        path.mkdir()
+    else:
+        path.write_bytes(b"spreadsheet saved over the history file" * 50)
+    history = ReviewHistory(path)
+    finding = salary_issue(salary_run())
+
+    for action in (history.count, lambda: history.apply([finding]), lambda: history.record(finding, ReviewStatus.ACCEPTED)):
+        with pytest.raises(HistoryError, match="could not be read or written"):
+            action()
+
+
+def test_locked_history_asks_to_retry(history, monkeypatch):
+    """Another operator saving at the same moment: a retry message, not a crash."""
+    from src.history import HistoryError
+
+    finding = salary_issue(salary_run())
+    history.record(finding, ReviewStatus.ACCEPTED)
+    blocker = sqlite3.connect(history.path)
+    blocker.execute("BEGIN EXCLUSIVE")
+    connect = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda path: connect(path, timeout=0.05))
+    try:
+        with pytest.raises(HistoryError, match="busy"):
+            history.record(finding, ReviewStatus.NEEDS_ACTION)
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+def test_run_continues_without_decisions_when_the_history_is_unreadable(tmp_path):
+    damaged = tmp_path / "history.sqlite"
+    damaged.write_bytes(b"not a database" * 100)
+
+    result = salary_run(ReviewHistory(damaged))
+
+    assert salary_issue(result).review_status is ReviewStatus.OPEN
+    assert any("could not be read or written" in note for note in result.notes)
+
+
+def test_version_changes_when_a_decision_is_saved(history):
+    assert history.version() is None
+    finding = salary_issue(salary_run())
+
+    history.record(finding, ReviewStatus.ACCEPTED)
+    first = history.version()
+    history.record(finding, ReviewStatus.NEEDS_ACTION, note="Payroll to correct")
+
+    assert first is not None and history.version() != first

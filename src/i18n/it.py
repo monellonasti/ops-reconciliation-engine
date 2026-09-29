@@ -118,6 +118,11 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
         "Modifiche attese: {listed} elencate, {matched} corrispondenti (declassate a info salvo IBAN), "
         "{mismatched} applicate con un valore diverso, {missing} non trovate."
     ),
+    "history.unavailable": (
+        "Impossibile leggere o scrivere il file dello storico delle revisioni ({path}). Le decisioni non "
+        "vengono mostrate né salvate finché il file non viene riparato, spostato o rimosso."
+    ),
+    "history.busy": "Il file dello storico delle revisioni ({path}) è occupato da un altro salvataggio. Riprova tra poco.",
     "cli.records": "Record elaborati: {current} (ciclo precedente: {previous})",
     "cli.counts": "Nuovi: {new}  Rimossi: {removed}  Variazioni: {changes}",
     "cli.severities": "Critici: {critical}  Avvisi: {warnings}  Info: {info}",
@@ -290,6 +295,7 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
     "ai.unavailable_failed": "Spiegazione AI non disponibile: richiesta fallita; vale la spiegazione da modello.",
     "ai.unavailable_refusal": "Spiegazione AI non disponibile per questa segnalazione; vale la spiegazione da modello.",
     "ai.unavailable_empty": "Spiegazione AI non disponibile: il modello non ha restituito testo.",
+    "ai.unavailable_truncated": "Spiegazione AI non disponibile: la risposta è stata troncata; vale la spiegazione da modello.",
     "ai.language_instruction": "Write in Italian.",
     # --- interfaccia ----------------------------------------------------------------
     "ui.subtitle": "Automatizza i controlli deterministici. Fai emergere le eccezioni. Lascia le decisioni alle persone.",
@@ -341,6 +347,7 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
     ),
     "ui.inputs.run": "Esegui riconciliazione",
     "ui.inputs.demo": "Carica dati demo",
+    "ui.inputs.running": "Riconciliazione in corso...",
     "ui.error.previous": "Ciclo precedente ({name}): {error}",
     "ui.error.current": "Ciclo corrente ({name}): {error}",
     "ui.error.expected": "Modifiche attese ({name}): {error}",
@@ -358,8 +365,8 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
     "ui.summary.changes": "Variazioni rilevate",
     "ui.summary.review": "Record da revisionare",
     "ui.summary.decided": (
-        "{decided} segnalazioni hanno già una decisione da un'esecuzione precedente: "
-        "{accepted} accettate (escluse dal conteggio da revisionare) e {needs_action} da correggere."
+        "Segnalazioni con una decisione registrata: {decided} ({accepted} accettate, escluse dal "
+        "conteggio da revisionare; {needs_action} da correggere)."
     ),
     "ui.queue.title": "3. Coda di revisione",
     "ui.queue.severity": "Severità",
@@ -419,6 +426,7 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
         "con gli stessi valori. Da correggere: problema noto, resta in coda finché non viene corretto. "
         "Aperta: nessuna decisione."
     ),
+    "ui.decision.saved": "Decisione salvata per {record}: {status}.",
     "ui.ai.title": "**Facoltativo: spiega con l'AI**",
     "ui.ai.not_configured": (
         "Non configurato. Imposta `ANTHROPIC_API_KEY` e installa il pacchetto `anthropic` per ottenere "

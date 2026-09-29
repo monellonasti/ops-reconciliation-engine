@@ -117,6 +117,11 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
         "Expected changes: {listed} listed, {matched} matched (downgraded to info unless IBAN), "
         "{mismatched} applied with a different value, {missing} not found."
     ),
+    "history.unavailable": (
+        "The review history file ({path}) could not be read or written. Decisions are not shown or "
+        "saved until the file is repaired, moved or removed."
+    ),
+    "history.busy": "The review history file ({path}) is busy with another save. Try again in a moment.",
     "cli.records": "Records processed: {current} (previous cycle: {previous})",
     "cli.counts": "New: {new}  Removed: {removed}  Changes: {changes}",
     "cli.severities": "Critical: {critical}  Warnings: {warnings}  Info: {info}",
@@ -288,6 +293,7 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
     "ai.unavailable_failed": "AI explanation unavailable: the request failed; the template explanation applies.",
     "ai.unavailable_refusal": "AI explanation unavailable for this finding; the template explanation applies.",
     "ai.unavailable_empty": "AI explanation unavailable: the model returned no text.",
+    "ai.unavailable_truncated": "AI explanation unavailable: the answer was cut off; the template explanation applies.",
     "ai.language_instruction": "Write in English.",
     # --- UI ---------------------------------------------------------------------------
     "ui.subtitle": "Automate deterministic checks. Surface exceptions. Keep humans in control.",
@@ -339,6 +345,7 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
     ),
     "ui.inputs.run": "Run reconciliation",
     "ui.inputs.demo": "Load demo dataset",
+    "ui.inputs.running": "Reconciling the files...",
     "ui.error.previous": "Previous cycle ({name}): {error}",
     "ui.error.current": "Current cycle ({name}): {error}",
     "ui.error.expected": "Expected changes ({name}): {error}",
@@ -356,8 +363,8 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
     "ui.summary.changes": "Changes detected",
     "ui.summary.review": "Records requiring review",
     "ui.summary.decided": (
-        "{decided} findings already carry a decision from an earlier run: "
-        "{accepted} accepted (excluded from the review count) and {needs_action} marked as needing action."
+        "Findings with a recorded decision: {decided} ({accepted} accepted, excluded from the review "
+        "count; {needs_action} needing action)."
     ),
     "ui.queue.title": "3. Review queue",
     "ui.queue.severity": "Severity",
@@ -417,6 +424,7 @@ MESSAGES: dict[str, str | tuple[str, ...]] = {
         "with the same values. Needs action: known problem, stays in the queue until corrected. "
         "Open: no decision yet."
     ),
+    "ui.decision.saved": "Decision saved for {record}: {status}.",
     "ui.ai.title": "**Optional: explain with AI**",
     "ui.ai.not_configured": (
         "Not configured. Set `ANTHROPIC_API_KEY` and install the `anthropic` package to enable "

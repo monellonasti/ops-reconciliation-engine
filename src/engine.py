@@ -16,7 +16,7 @@ from typing import IO, Any
 from src.anomaly_detection import detect_anomalies
 from src.config import Rules, RulesConfigError, load_rules
 from src.expectations import ExpectedChanges, load_expected_changes
-from src.history import ReviewHistory, open_history
+from src.history import HistoryError, ReviewHistory, open_history
 from src.i18n import set_language, t
 from src.loader import DatasetLoadError, LoadedDataset, load_dataset
 from src.models import ReconciliationResult, ReviewStatus
@@ -43,7 +43,8 @@ def run_reconciliation(
 ) -> ReconciliationResult:
     """Full pipeline on two already-loaded datasets.
 
-    With a ``history``, findings an operator already decided on carry that decision.
+    With a ``history``, findings an operator already decided on carry that decision;
+    a history file that cannot be read is reported in the notes, not raised.
     With ``expected`` changes, approved changes are downgraded and missing ones reported.
     """
     apply_presentation(rules)
@@ -59,8 +60,12 @@ def run_reconciliation(
         *detect_anomalies(current_validated, rules),
     ]
     issues = sort_issues(issues)
+    history_problem = None
     if history is not None:
-        issues = history.apply(issues)
+        try:
+            issues = history.apply(issues)
+        except HistoryError as exc:
+            history_problem = str(exc)
     summary = build_summary(
         issues,
         previous_records=previous.record_count,
@@ -73,7 +78,10 @@ def run_reconciliation(
         summary.warnings,
         summary.records_requiring_review,
     )
-    notes = previous.notes + current.notes
+    # The same remark about both files (e.g. the same optional column missing) is shown once.
+    notes = list(dict.fromkeys(previous.notes + current.notes))
+    if history_problem:
+        notes.append(history_problem)
     if previous.issues or current.issues:
         notes.append(t("note.rows_skipped"))
     if any(issue.rule == "duplicate_employee_id" for issue in issues):
@@ -100,6 +108,7 @@ def reconcile_sources(
 ) -> ReconciliationResult:
     """Convenience wrapper: load the sources and run the pipeline."""
     rules = rules or load_rules()
+    apply_presentation(rules)  # loader notes and skipped-row messages use the rules' language
     previous = load_dataset(previous_source, name="previous", rules=rules)
     current = load_dataset(current_source, name="current", rules=rules)
     expected = load_expected_changes(expected_source) if expected_source is not None else None

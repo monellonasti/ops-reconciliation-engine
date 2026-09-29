@@ -5,21 +5,24 @@ comes from a catalog keyed by a stable identifier. English is the reference
 catalog; a key missing from another language falls back to English, so a
 partial translation degrades gracefully instead of failing.
 
-The active language is module-level state set once per run or per UI render
-(``set_language``). Rule identifiers, column names and CSV headers are never
-translated: they are data, not prose.
+The active language is set once per run or per UI render (``set_language``).
+It is context-local, not global: Streamlit serves every browser session from
+its own thread, and one session switching language must not change the text
+another session is producing at the same moment. Rule identifiers, column
+names and CSV headers are never translated: they are data, not prose.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 
 from src.i18n import en, it
 
-LANGUAGES: dict[str, dict[str, str | Sequence[str]]] = {"en": en.MESSAGES, "it": it.MESSAGES}
+LANGUAGES: dict[str, Mapping[str, str | Sequence[str]]] = {"en": en.MESSAGES, "it": it.MESSAGES}
 DEFAULT_LANGUAGE = "en"
 
-_current = DEFAULT_LANGUAGE
+_current: ContextVar[str] = ContextVar("ops_recon_language", default=DEFAULT_LANGUAGE)
 
 
 def available_languages() -> list[str]:
@@ -30,14 +33,13 @@ def set_language(code: str) -> str:
     """Select the catalog for subsequent ``t`` calls. Returns the previous language."""
     if code not in LANGUAGES:
         raise ValueError(f"Unsupported language '{code}'; available: {', '.join(LANGUAGES)}")
-    global _current
-    previous = _current
-    _current = code
+    previous = _current.get()
+    _current.set(code)
     return previous
 
 
 def get_language() -> str:
-    return _current
+    return _current.get()
 
 
 def t(message_key: str, /, **values: object) -> str:
@@ -60,7 +62,7 @@ def t_list(message_key: str, /) -> list[str]:
 
 
 def _lookup(message_key: str) -> str | Sequence[str]:
-    catalog = LANGUAGES[_current]
+    catalog = LANGUAGES[_current.get()]
     if message_key in catalog:
         return catalog[message_key]
     try:

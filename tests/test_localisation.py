@@ -263,3 +263,53 @@ def test_english_is_restored_for_the_next_test():
     assert i18n.get_language() == "en"
     assert format_value(2100.5) == "2,100.50"
     assert not re.search(r"riga", t("record.row", line=1))
+
+
+# --- isolation between sessions ------------------------------------------------------
+
+
+def test_each_thread_keeps_its_own_language_and_formats():
+    """Streamlit serves each browser session from its own thread: one operator switching
+    to English must not turn another operator's Italian run into English."""
+    import threading
+
+    from src.engine import apply_presentation
+
+    italian_started, english_set = threading.Event(), threading.Event()
+    seen: dict[str, object] = {}
+
+    def italian_session():
+        apply_presentation(italian_rules())
+        italian_started.set()
+        english_set.wait(5)  # the other session changes language meanwhile
+        seen["label"] = t("severity.warning")
+        seen["number"] = format_number(2100.5)
+        seen["parsed"] = parse_number("2.100,50")
+
+    def english_session():
+        italian_started.wait(5)
+        apply_presentation(load_rules())
+        seen["english"] = t("severity.warning")
+        english_set.set()
+
+    threads = [threading.Thread(target=italian_session), threading.Thread(target=english_session)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert seen == {"english": "Warning", "label": "Avviso", "number": "2.100,50", "parsed": 2100.5}
+
+
+def test_loader_messages_follow_the_rules_language():
+    """The command line loads files before running: loader text must already be Italian."""
+    header = "employee_id;first_name;last_name;contract_type;monthly_salary\n"
+    previous = (header + "EMP-1;Ada;Rossi;full_time;2.100\n").encode()
+    current = (header + "EMP-1;Ada;Rossi;full_time;2.100\nEMP-2;Bo\n").encode()
+
+    result = reconcile_sources(previous, current, italian_rules())
+
+    malformed = next(issue for issue in result.issues if issue.rule == "malformed_row")
+    assert malformed.message.startswith("La riga 3 ha 2 campi")
+    assert result.notes[0].startswith("Colonne facoltative assenti")
+    assert len(result.notes) == len(set(result.notes))  # same remark on both files shown once

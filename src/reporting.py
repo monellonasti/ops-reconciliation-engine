@@ -85,19 +85,28 @@ def build_summary(issues: list[Issue], previous_records: int, current_records: i
 def issues_to_frame(issues: list[Issue]) -> pd.DataFrame:
     """Flat table with one row per issue, enum values as plain strings."""
     records = [issue.model_dump(mode="json") for issue in issues]
-    return pd.DataFrame.from_records(records, columns=EXPORT_COLUMNS)
+    frame = pd.DataFrame.from_records(records, columns=EXPORT_COLUMNS)
+    # A column mixing line numbers and blanks would otherwise become float: "175.0".
+    frame["row_number"] = frame["row_number"].astype("Int64")
+    return frame
 
 
 def to_csv_bytes(frame: pd.DataFrame) -> bytes:
     """UTF-8 with BOM so the file opens cleanly in spreadsheet tools."""
     buffer = io.StringIO()
-    safe = frame.map(
-        lambda value: "'" + value
-        if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@"))
-        else value
-    )
+    safe = frame.copy()
+    for column in safe.columns:
+        if not pd.api.types.is_numeric_dtype(safe[column]):  # numbers keep their dtype (175, not 175.0)
+            safe[column] = safe[column].map(_as_literal_text)
     safe.to_csv(buffer, index=False, lineterminator="\n")
     return buffer.getvalue().encode("utf-8-sig")
+
+
+def _as_literal_text(value: object) -> object:
+    """Text a spreadsheet would run as a formula is prefixed so it stays text."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
 
 
 def full_report_csv(result: ReconciliationResult) -> bytes:

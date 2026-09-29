@@ -1,10 +1,11 @@
 """Small helpers used across the engine: missing-value checks, masking, formatting.
 
 Numbers and dates are read and shown according to the ``formats`` block of the
-rules file, applied once per run through :func:`configure_formats`. Values
-stored inside findings stay canonical (floats, ISO dates) so that exports and
-review-history fingerprints do not depend on the display convention; only
-text shown to people is localised.
+rules file, applied once per run through :func:`configure_formats`. Like the
+language, the setting is context-local so concurrent Streamlit sessions do not
+read each other's convention. Values stored inside findings stay canonical
+(floats, ISO dates) so that exports and review-history fingerprints do not
+depend on the display convention; only text shown to people is localised.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -34,7 +36,7 @@ class Formats:
     input_date_formats: tuple[str, ...] = ("%Y-%m-%d", "%d/%m/%Y")
 
 
-_formats = Formats()
+_formats: ContextVar[Formats] = ContextVar("ops_recon_formats", default=Formats())
 
 
 def configure_formats(
@@ -45,19 +47,20 @@ def configure_formats(
     input_date_formats: Sequence[str] = ("%Y-%m-%d", "%d/%m/%Y"),
 ) -> Formats:
     """Set how numbers and dates are read and shown. Returns the previous settings."""
-    global _formats
-    previous = _formats
-    _formats = Formats(
-        decimal_separator=decimal_separator,
-        thousands_separator=thousands_separator,
-        output_date_format=output_date_format,
-        input_date_formats=tuple(input_date_formats),
+    previous = _formats.get()
+    _formats.set(
+        Formats(
+            decimal_separator=decimal_separator,
+            thousands_separator=thousands_separator,
+            output_date_format=output_date_format,
+            input_date_formats=tuple(input_date_formats),
+        )
     )
     return previous
 
 
 def current_formats() -> Formats:
-    return _formats
+    return _formats.get()
 
 
 def reset_formats() -> None:
@@ -124,7 +127,7 @@ def parse_number(value: Any, formats: Formats | None = None) -> float | None:
     thousands grouping is consistent, so a value written in the other
     convention is reported as invalid instead of being silently misread.
     """
-    fmt = formats or _formats
+    fmt = formats or _formats.get()
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -171,7 +174,7 @@ def percentage_change(previous: Any, current: Any, *, rounded: bool = True) -> f
 
 def _localise_separators(text: str) -> str:
     """Turn Python's ``1,234.56`` rendering into the configured separators."""
-    fmt = _formats
+    fmt = _formats.get()
     if fmt.thousands_separator == "," and fmt.decimal_separator == ".":
         return text
     return (
@@ -195,7 +198,7 @@ def format_plain(number: float) -> str:
 
 
 def format_date(value: datetime | date | pd.Timestamp) -> str:
-    return value.strftime(_formats.output_date_format)
+    return value.strftime(_formats.get().output_date_format)
 
 
 def format_value(value: Any) -> str:
@@ -242,7 +245,7 @@ def format_timestamp(iso_text: str | None) -> str:
         return iso_text
     if moment.tzinfo is not None:
         moment = moment.astimezone()
-    return moment.strftime(f"{_formats.output_date_format} %H:%M")
+    return moment.strftime(f"{_formats.get().output_date_format} %H:%M")
 
 
 def format_for_display(value: Any) -> str:

@@ -132,6 +132,7 @@ def fake_anthropic(monkeypatch):
         setattr(module, name, type(name, (Exception,), {}))
     module.APIStatusError = type("APIStatusError", (Exception,), {"status_code": 500})
     calls: list[dict] = []
+    clients: list[dict] = []
 
     class Messages:
         def __init__(self, response):
@@ -144,11 +145,15 @@ def fake_anthropic(monkeypatch):
             return self.response
 
     def install(response):
-        module.Anthropic = lambda: types.SimpleNamespace(messages=Messages(response))
+        def client(**options):
+            clients.append(options)
+            return types.SimpleNamespace(beta=types.SimpleNamespace(messages=Messages(response)))
+
+        module.Anthropic = client
         monkeypatch.setitem(sys.modules, "anthropic", module)
         monkeypatch.setenv(explain_module.API_KEY_ENV, "test-key")
 
-    return types.SimpleNamespace(module=module, install=install, calls=calls)
+    return types.SimpleNamespace(module=module, install=install, calls=calls, clients=clients)
 
 
 def test_llm_rewrite_returns_the_text_blocks(fake_anthropic, rules):
@@ -170,12 +175,41 @@ def test_llm_rewrite_returns_the_text_blocks(fake_anthropic, rules):
     assert "42.86" in call["messages"][0]["content"]
 
 
+def test_llm_request_is_bounded_and_sends_only_the_finding(fake_anthropic, rules):
+    """The operator waits on a spinner, and their own note and name stay on the machine."""
+    fake_anthropic.install(
+        types.SimpleNamespace(stop_reason="end_turn", content=[types.SimpleNamespace(type="text", text="ok")])
+    )
+    reviewed = make_issue().model_copy(
+        update={"review_note": "Called Ada at home", "reviewed_by": "Mario Bianchi", "reviewed_at": "2026-09-28"}
+    )
+
+    explain_with_llm(reviewed, rules)
+
+    options, call = fake_anthropic.clients[0], fake_anthropic.calls[0]
+    assert options["timeout"] <= 60 and options["max_retries"] <= 1
+    assert call["output_config"] == {"effort": "low"}
+    assert call["fallbacks"] == "default" and call["betas"] == ["server-side-fallback-2026-07-01"]
+    sent = call["messages"][0]["content"]
+    assert "Called Ada" not in sent and "Mario Bianchi" not in sent and "review_note" not in sent
+    assert "EMP-00125" in sent
+
+
 def test_llm_refusal_falls_back_to_the_template(fake_anthropic, rules):
     fake_anthropic.install(types.SimpleNamespace(stop_reason="refusal", content=[]))
 
     text = explain_with_llm(make_issue(), rules)
 
     assert "template explanation applies" in text
+
+
+def test_llm_answer_cut_off_is_not_shown(fake_anthropic, rules):
+    partial = types.SimpleNamespace(type="text", text="The salary rose by 42.86%. This is")
+    fake_anthropic.install(types.SimpleNamespace(stop_reason="max_tokens", content=[partial]))
+
+    text = explain_with_llm(make_issue(), rules)
+
+    assert "cut off" in text and "42.86" not in text
 
 
 def test_llm_errors_become_one_line_messages(fake_anthropic, rules):
