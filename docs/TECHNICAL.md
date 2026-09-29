@@ -557,10 +557,18 @@ The demo data is synthetic, but the tool is designed as if it were not:
 - **No external calls by default.** The engine runs entirely locally. The
   only network call the code can make is the optional AI explanation, which
   requires an API key to be set explicitly and is triggered per finding by a
-  button. Streamlit usage telemetry is disabled in `.streamlit/config.toml`. What it sends is the masked finding and the template explanation.
+  button. Streamlit usage telemetry is disabled in `.streamlit/config.toml`. What it sends is the masked finding and the template explanation;
+  the operator's review status, note and name are not sent.
 - **No logging of values.** Normal operation logs counts only (rows loaded,
-  issues found). Unexpected failures log a generic message without exception
-  values and show an operator-friendly error.
+  issues found). Unexpected failures log the error type without its message
+  and show an operator-friendly error; this includes library errors raised
+  while reading a damaged Excel sheet, whose messages can quote a cell.
+  As a second line of defence `.streamlit/config.toml` sets
+  `showErrorDetails = "type"`, so an error nobody anticipated shows only its
+  type in the browser; message and traceback stay in the server console.
+- **An unusable history file does not stop the tool.** If the SQLite file is
+  damaged, locked or not writable, reconciliation runs without decisions, the
+  sidebar and the decision panel say why, and the CLI prints it as a note.
 - **Names appear in the UI** where they help an operator identify a record
   (the record snapshot, new/removed messages). Add `first_name` and `last_name`
   to `masked_fields` to hide them. Optional AI sends the displayed finding and
@@ -584,7 +592,11 @@ model receives the masked finding and the template explanation (including
 relevant rule thresholds), and is instructed not to judge whether the change is correct
 and not to invent facts. If the request fails for any reason (no network,
 bad key, rate limit, refusal) the UI shows a one-line reason and the template
-explanation stands. Set `OPS_RECON_LLM_MODEL` to a model available to your account. Live provider
+explanation stands. Requests time out after 45 seconds with one retry, run at
+low effort, and use server-side refusal fallback (`fallbacks: "default"`); an
+answer cut off by the token limit is not shown. The default model is
+`claude-opus-5-5`; set `OPS_RECON_LLM_MODEL` to another model available to your
+account that accepts these parameters. Live provider
 compatibility has not been verified in this audit; SDK interactions are tested
 with offline fakes. Templates remain the authoritative explanation.
 
@@ -593,8 +605,9 @@ with offline fakes. Templates remain the authoritative explanation.
 - The record key is fixed to `employee_id` and the column layout is defined
   in code (`src/models.py`). Using the engine for a different dataset means
   editing that module and the rule functions that reference specific columns.
-- Numbers must use a dot as decimal separator; `2.100,50` is reported as
-  invalid rather than guessed at.
+- Numbers are read with the separators configured under `formats`; a value
+  written in the other convention (`2.100,50` under the default profile,
+  `2100.50` under the Italian one) is reported as invalid rather than guessed at.
 - When an `employee_id` repeats in either cycle, cross-cycle comparisons for
   that ID are skipped until the source is corrected. All rows still receive
   single-cycle validation; no candidate is treated as authoritative.

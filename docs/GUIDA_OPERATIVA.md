@@ -221,6 +221,14 @@ Ogni decisione e ogni annullamento vengono registrati con data e ora in un
 archivio locale (sezione 9). Non esiste una "decisione automatica": lo
 strumento non accetta nulla da solo.
 
+Dopo il salvataggio compare una conferma verde nel pannello di dettaglio.
+Una segnalazione accettata esce dalla coda filtrata, quindi il pannello torna
+vuoto: è il comportamento atteso. Se l'archivio non è utilizzabile (file
+danneggiato o occupato da un altro salvataggio), un avviso giallo nella barra
+laterale lo spiega e il blocco decisione non propone il salvataggio; la
+riconciliazione funziona comunque. Se il messaggio dice che l'archivio è
+occupato, basta riprovare dopo qualche secondo.
+
 ![Decisione registrata su una segnalazione](screenshots/05-decisione.png)
 
 ## 6. Modifiche attese: dire prima cosa è già approvato
@@ -338,7 +346,9 @@ arrivano già come tali.
   Nessun dato lascia la macchina; l'unica funzione che contatta un servizio
   esterno è la spiegazione generata da un modello linguistico, disattivata
   finché l'IT non configura esplicitamente una chiave, e attivata per singola
-  segnalazione con un pulsante.
+  segnalazione con un pulsante. Al servizio va solo la segnalazione (con i
+  valori già mascherati) e la sua spiegazione standard: non la nota, lo stato
+  o il nome del revisore.
 - **Cosa resta in memoria**: i due file e il risultato, per la durata della
   sessione nel browser. Chiudendo la sessione spariscono. "Azzera sessione"
   li elimina subito.
@@ -412,6 +422,8 @@ valide.
 **Chi vede le decisioni?**
 Chiunque usi lo strumento sulla stessa installazione. Non esistono utenti né
 permessi: l'accesso è quello del computer, o della rete, su cui è installato.
+Se due persone lavorano sulla stessa installazione, la decisione salvata da
+una compare all'altra alla prima azione successiva, senza rieseguire.
 
 ## 12. Glossario
 

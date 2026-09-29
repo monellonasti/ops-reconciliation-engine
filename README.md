@@ -122,14 +122,17 @@ Per usare i propri file bastano due export con le stesse colonne del demo
   Un profilo italiano pronto in `rules/validation_rules.it.yaml`.
 - Lo stesso motore gira da riga di comando, quindi può essere programmato
   (per esempio ogni primo del mese) e produrre i report senza interfaccia.
-- Una suite di test automatici (399 al 28 settembre 2026, eseguibile con
+- Una suite di test automatici (423 al 29 settembre 2026, eseguibile con
   `python -m pytest`) copre le regole di confronto, le soglie, il
   mascheramento dei dati sensibili e la gestione dei file malformati.
 - Il progetto è stato sottoposto a una revisione indipendente del codice; i
   problemi trovati e le correzioni sono documentati in [`AUDIT.md`](AUDIT.md).
   L'audit precede le tre funzioni aggiunte dopo (storico delle decisioni,
   modifiche attese, lingua e formati italiani), quindi i suoi conteggi, 271
-  test al termine delle correzioni, sono quelli di quella data.
+  test al termine delle correzioni, sono quelli di quella data. Un secondo
+  audit operativo (29 settembre 2026) ha riguardato l'applicazione completa:
+  robustezza sui file danneggiati, sessioni contemporanee, storico non
+  disponibile; è riassunto in fondo allo stesso file.
 
 ## Limiti attuali
 

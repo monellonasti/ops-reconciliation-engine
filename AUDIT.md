@@ -7,6 +7,8 @@
 > and Excel input, are outside its scope and brought the suite to 399 tests
 > at the time of publication. The counts below are therefore historical; the
 > current figure is the one in the README, verified with `python -m pytest`.
+> A second, operational audit of the complete application (2026-09-29) is
+> recorded at the end of this file.
 
 Audit date: 2026-09-25. Baseline: commit `95daf51`, with pre-existing untracked `reports/` left untouched. This document records the original implementation before remediation; the final section records subsequent verification. No application changes preceded this audit. Running the existing suite did invoke its demo generator test, which rewrites the fixtures with identical bytes.
 
@@ -225,3 +227,55 @@ Manual scenario coverage now includes unchanged, all requested salary/bonus/over
 ## Final repository readiness
 
 **YES — suitable to publish as a local MVP portfolio project with the documented limitations.** Identified P0 and P1 correctness/privacy/workflow gaps were addressed and behaviorally verified. This is not production payroll software, an autonomous decision system or a claim of deployment hardening. The initial audit, remediation and evidence remain in this file so reviewers can assess the result rather than rely on a success assertion.
+
+## Operational audit — 2026-09-29
+
+Scope: the whole application as published at commit `dc90d61` (review history,
+expected changes, Italian formats and Excel input included). Method: read every
+module, reproduce each suspected defect with a script before changing code, fix
+the cause, add a regression test that fails on the old code, then verify in a
+running browser. Baseline: 400 tests passing, Ruff clean, no type checker configured.
+
+| # | Area | Defect (reproduced) | Fix |
+|---|------|---------------------|-----|
+| 1 | Privacy | An `.xlsx` whose sheet is damaged failed *while rows were read*, outside the wrapped workbook open; openpyxl's `ValueError` quoted the cell (a full IBAN) and reached the browser as an uncaught exception | Row reading wrapped into the operator error; the app turns any unexpected reading error into a generic message and logs only the type; `showErrorDetails = "type"` as second line |
+| 2 | Privacy | The optional AI request sent the operator's review note, name and status | Only the finding and template are sent |
+| 3 | Availability | A damaged, locked or folder-shaped history file raised on every page load (sidebar count) and on save: the tool was unusable | `HistoryError` with an operator message; runs continue without decisions, sidebar and decision panel explain, CLI prints a note; failed connections are closed (Windows file lock) |
+| 4 | Concurrency | Language and number formats were process-global; with a second browser session in English, 32 of 46 messages of an Italian run came out in English | Context-local state (`ContextVar`), one value per session thread |
+| 5 | Data integrity | Fingerprints of findings without an ID used the translated label ("row 3"/"riga 3"): switching language reopened decided findings | Language-neutral identity, identical to the English form so existing decisions still match |
+| 6 | Stale data | Decisions saved in another session or tab appeared only after a new run; the decision form could show an outdated status | History file version checked on each render; changes re-applied |
+| 7 | Localisation | `reconcile_sources` / CLI loaded files before applying the rules' language: loader notes and skipped-row messages in English under the Italian profile | Presentation applied before loading |
+| 8 | Input | Excel numeric IDs stayed numbers: record snapshot empty for those findings | Keys normalised to text (`125`, not `125.0`) |
+| 9 | Input | CSV files with CR-only line endings (older Mac exports) failed to parse | `newline=""` for the CSV reader; line numbers unchanged |
+| 10 | Exports | `row_number` exported as `175.0` | Integer column; formula escaping limited to non-numeric columns (still covers pandas 3 `str` columns) |
+| 11 | UI state | "Reset session" left the old files shown in the uploaders next to a disabled Run button | Uploaders recreated with new keys |
+| 12 | UI state | With `?demo=1`, any interaction after a failed run replaced its error with the demo | Demo link used once per session |
+| 13 | Feedback | No confirmation after saving a decision (an accepted row simply disappears); no loading indicator during a run | Confirmation in the detail panel; spinner while reconciling |
+| 14 | AI calls | No timeout (SDK default 10 minutes, 2 retries); `max_tokens=600` with always-on reasoning could cut or empty the answer | 45 s timeout, 1 retry, low effort, 4,096 tokens, cut-off answers not shown, server-side refusal fallback |
+| 15 | Performance | Both CSV exports rebuilt on every click (0.5 s per rerun at 100,000 records) | Built once per result |
+| 16 | Text | Identical notes shown twice; "1 findings already carry a decision from an earlier run"; TECHNICAL.md still said numbers must use a dot | Notes de-duplicated; caption rephrased (EN/IT); documentation corrected |
+
+Verification: 423 tests pass (23 new regression tests), Ruff clean. mypy run
+ad hoc (not configured in the project): no finding in changed code; 24
+pre-existing findings are pandas-stub and Optional-narrowing noise already
+guarded at runtime. Browser, headless Chrome against the running app: 14/14
+end-to-end checks (two concurrent sessions and decision sync, save
+confirmation, empty and damaged uploads, no IBAN digits on the page, reset,
+damaged history file). CLI with the Italian profile and a damaged history file:
+exit 0, note printed. Synthetic timing on the development machine: 20,000
+records per cycle in about 2 s, 100,000 in about 13 s.
+
+Left open, with the reason:
+
+- **Network exposure.** Streamlit listens on all interfaces by default and the
+  tool has no authentication by design; the operations guide states that access
+  is that of the machine or network. Binding to `127.0.0.1` would change who can
+  use an installation, so it is a deployment decision, not a code fix.
+- **Salary removed with a non-default configuration.** A salary that goes from
+  a value to blank is reported as missing data because `monthly_salary` is
+  required by default; if a rules file removes it from `required_fields`, the
+  removal is not reported at all. Which severity it should have is a business rule.
+- **Live AI provider call** not exercised (no key in this environment); request
+  shape and error paths are tested with an offline fake.
+- **Excel cells beyond the header** are ignored, while a CSV row with extra
+  fields is reported as malformed.
